@@ -125,18 +125,76 @@ class DashboardController extends Controller
             }
         }
 
-        // Enrichir le top contributeurs avec les noms
+        // ── Tarifs : P_Ressource_Prix (index par IDPersonnel et IDMateriel) ──
+        $tarifsPersonnel = $this->loadTarifs('IDPersonnel');
+        $tarifsMateriel  = $this->loadTarifs('IDMateriel');
+
+        // ── Coût MO estimé = Σ (heures pointées × tarif personnel) ──────────
+        $coutMO = 0.0;
         $topContributeurs = $heuresParPersonne
             ->sortDesc()
             ->take(10)
-            ->map(function ($h, $idPers) {
+            ->map(function ($h, $idPers) use ($tarifsPersonnel, &$coutMO) {
                 $row = $this->lookupRow('S_Personnel', 'IDPersonnel', $idPers);
                 $nom = $row
                     ? trim(($row['Prenom'] ?? '') . ' ' . ($row['Nom'] ?? '')) ?: ($row['Login'] ?? "Personnel #{$idPers}")
                     : "Personnel #{$idPers}";
-                return ['nom' => $nom, 'heures' => round($h, 2)];
+                $tarif = (float) ($tarifsPersonnel[$idPers] ?? 0);
+                $cout  = round($h * $tarif, 2);
+                return ['nom' => $nom, 'heures' => round($h, 2), 'tarif' => $tarif, 'cout' => $cout];
             })
             ->values();
+        // Coût total MO (toutes les personnes, pas seulement le top 10)
+        foreach ($heuresParPersonne as $idPers => $h) {
+            $coutMO += $h * (float) ($tarifsPersonnel[$idPers] ?? 0);
+        }
+        $coutMO = round($coutMO, 2);
+
+        // ── Heures matériel + coût matériel ────────────────────────────────
+        $matTable = $this->detectMaterielTable();
+        $heuresParMateriel = collect();
+        $coutMateriel = 0.0;
+        if ($matTable) {
+            // Plusieurs schémas possibles : la table peut avoir IDProjet direct,
+            // ou être liée par IDP_Planning à un planning du projet.
+            $rowsMat = $this->rawRows()
+                ->where('table_name', $matTable)
+                ->where(function ($q) use ($id, $planningIds) {
+                    $q->whereRaw("(payload->>'IDProjet')::int = ?", [$id]);
+                    if (!empty($planningIds)) {
+                        $q->orWhereRaw(
+                            "(payload->>'IDP_Planning')::int = ANY(?)",
+                            ['{' . implode(',', $planningIds) . '}']
+                        );
+                    }
+                })
+                ->get()
+                ->map(fn ($r) => $this->jsonRow($r->payload));
+
+            foreach ($rowsMat as $pm) {
+                $idMat  = $pm['IDMateriel'] ?? $pm['IDP_Materiel'] ?? null;
+                $heures = (float) ($pm['Heures'] ?? $pm['NbHeures'] ?? $pm['Quantite'] ?? $pm['Duree'] ?? 0);
+                if (!$idMat || $heures <= 0) continue;
+                $heuresParMateriel[$idMat] = ($heuresParMateriel[$idMat] ?? 0) + $heures;
+                $coutMateriel += $heures * (float) ($tarifsMateriel[$idMat] ?? 0);
+            }
+        }
+        $coutMateriel = round($coutMateriel, 2);
+
+        $topMateriel = $heuresParMateriel
+            ->sortDesc()
+            ->take(10)
+            ->map(function ($h, $idMat) use ($tarifsMateriel) {
+                $row = $this->lookupRow('P_Materiel', 'IDMateriel', $idMat)
+                    ?? $this->lookupRow('S_Moyen', 'IDMoyen', $idMat);
+                $nom = $row['Designation'] ?? $row['Nom'] ?? $row['Libelle'] ?? "Matériel #{$idMat}";
+                $tarif = (float) ($tarifsMateriel[$idMat] ?? 0);
+                $cout  = round($h * $tarif, 2);
+                return ['nom' => $nom, 'heures' => round($h, 2), 'tarif' => $tarif, 'cout' => $cout];
+            })
+            ->values();
+
+        $coutTotal = round($coutMO + $coutMateriel, 2);
 
         // ── Dépensé par famille via S_Com_Suivi_Element (si dispo) ──────────
         $depenseParFamille = collect();
@@ -150,8 +208,47 @@ class DashboardController extends Controller
         return view('dashboard.projet', compact(
             'projet', 'etatLibelle', 'gestionnaireNom', 'departementNom',
             'taches', 'planningCount', 'heuresEffectives', 'topContributeurs',
+            'coutMO', 'coutMateriel', 'coutTotal', 'topMateriel', 'matTable',
             'depenseParFamille'
         ));
+    }
+
+    /**
+     * Construit un index id → tarif horaire depuis P_Ressource_Prix.
+     * `$idCol` = IDPersonnel ou IDMateriel.
+     * Si plusieurs lignes existent (historique de tarifs), on garde la dernière non-vide.
+     */
+    private function loadTarifs(string $idCol): array
+    {
+        if (!$this->rawRows()->where('table_name', 'P_Ressource_Prix')->exists()) {
+            return [];
+        }
+        $rows = $this->rawRows()
+            ->where('table_name', 'P_Ressource_Prix')
+            ->get()
+            ->map(fn ($r) => $this->jsonRow($r->payload));
+
+        $out = [];
+        foreach ($rows as $r) {
+            $id = $r[$idCol] ?? null;
+            if (!$id) continue;
+            // Colonnes prix possibles, par ordre de priorité
+            $tarif = (float) ($r['PrixHoraire'] ?? $r['Tarif'] ?? $r['Prix']
+                ?? $r['PrixUnitaire'] ?? $r['Montant'] ?? 0);
+            if ($tarif > 0) $out[$id] = $tarif;
+        }
+        return $out;
+    }
+
+    /** Détecte la 1ère table de pointage matériel synchronisée. */
+    private function detectMaterielTable(): ?string
+    {
+        foreach (['p_pointage_materiel_location', 'P_Pointage_Materiel_Affectation', 'P_Pointage_Materiel'] as $name) {
+            if ($this->rawRows()->where('table_name', $name)->exists()) {
+                return $name;
+            }
+        }
+        return null;
     }
 
     /** Décode un payload JSONB (string ou objet). */

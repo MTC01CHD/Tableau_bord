@@ -66,6 +66,40 @@
         </div>
     </div>
 
+    {{-- ── KPI dépenses estimées (heures × tarif P_Ressource_Prix) ────── --}}
+    <div class="grid grid-2" style="margin-bottom:16px;">
+        <div class="card kpi">
+            <span class="kpi-label">Coût MO estimé</span>
+            <span class="kpi-value" style="color:var(--warn);">{{ number_format($coutMO, 2, ',', ' ') }} €</span>
+            <span class="muted">Σ heures personnel × tarif (P_Ressource_Prix)</span>
+        </div>
+        <div class="card kpi">
+            <span class="kpi-label">Coût matériel estimé</span>
+            <span class="kpi-value" style="color:var(--warn);">{{ number_format($coutMateriel, 2, ',', ' ') }} €</span>
+            <span class="muted">
+                Σ heures matériel × tarif
+                @if ($matTable)
+                    · source : <code>{{ $matTable }}</code>
+                @else
+                    · <span style="color:var(--err);">aucune table de pointage matériel sync</span>
+                @endif
+            </span>
+        </div>
+        <div class="card kpi" style="grid-column:1/-1;">
+            <span class="kpi-label">Coût total dépensé estimé (MO + matériel)</span>
+            <span class="kpi-value" style="color:var(--err);font-size:32px;">{{ number_format($coutTotal, 2, ',', ' ') }} €</span>
+            @php
+                $resteAFaire = $sommeV - $coutTotal;
+            @endphp
+            <span class="muted">
+                Marge théorique vs vendu :
+                <strong style="color:{{ $resteAFaire >= 0 ? 'var(--ok)' : 'var(--err)' }};">
+                    {{ number_format($resteAFaire, 2, ',', ' ') }} €
+                </strong>
+            </span>
+        </div>
+    </div>
+
     {{-- ── Tâches ──────────────────────────────────────────────────────── --}}
     <div class="card" style="margin-bottom:16px;">
         <h2>Tâches du projet ({{ $taches->count() }})</h2>
@@ -107,61 +141,92 @@
         @endif
     </div>
 
-    {{-- ── Top contributeurs MO ────────────────────────────────────────── --}}
-    <div class="grid grid-2" style="margin-bottom:16px;">
-        <div class="card">
-            <h2>Top contributeurs (heures pointées)</h2>
-            @if ($topContributeurs->isEmpty())
-                <p class="muted">
-                    Aucun pointage trouvé pour ce projet, ou la table <code>P_Planning_Pointage</code> et/ou <code>S_Personnel</code>
-                    ne sont pas encore synchronisées.
-                </p>
-            @else
-                <canvas id="chart-contributeurs" style="max-height:280px;"></canvas>
-            @endif
-        </div>
-
-        <div class="card">
-            <h2>Dépensé par famille (S_Com_Suivi_Element)</h2>
-            @if ($depenseParFamille->isEmpty())
-                <p class="muted">
-                    @if (\Illuminate\Support\Facades\DB::table('hfsql_raw_rows')->where('table_name','S_Com_Suivi_Element')->exists())
-                        Aucune dépense enregistrée pour ce projet dans <code>S_Com_Suivi_Element</code>.
-                    @else
-                        Table <code>S_Com_Suivi_Element</code> non encore synchronisée — à activer dans <a href="{{ route('admin.hfsql.tables') }}">Admin → Tables à synchroniser</a>.
-                    @endif
-                </p>
-            @else
-                <p class="muted" style="font-size:12px;">{{ $depenseParFamille->count() }} ligne(s) brute(s) — mapping vente/achat × famille à finaliser dès que la structure réelle est identifiée.</p>
-            @endif
-        </div>
+    {{-- ── Top contributeurs MO (personnel) ────────────────────────────── --}}
+    <div class="card" style="margin-bottom:16px;">
+        <h2>Personnel — heures × tarif (Top 10)</h2>
+        @if ($topContributeurs->isEmpty())
+            <p class="muted">
+                Aucun pointage trouvé pour ce projet, ou les tables <code>P_Planning_Pointage</code> / <code>S_Personnel</code>
+                ne sont pas encore synchronisées.
+            </p>
+        @else
+            <table>
+                <thead>
+                    <tr>
+                        <th>Personne</th>
+                        <th style="text-align:right;">Heures</th>
+                        <th style="text-align:right;">Tarif horaire</th>
+                        <th style="text-align:right;">Coût MO</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach ($topContributeurs as $c)
+                        <tr>
+                            <td>{{ $c['nom'] }}</td>
+                            <td style="text-align:right;">{{ number_format($c['heures'], 2, ',', ' ') }} h</td>
+                            <td style="text-align:right;{{ $c['tarif'] == 0 ? 'color:var(--err);' : '' }}">
+                                {{ $c['tarif'] > 0 ? number_format($c['tarif'], 2, ',', ' ') . ' €' : '— tarif manquant' }}
+                            </td>
+                            <td style="text-align:right;font-weight:600;">{{ number_format($c['cout'], 2, ',', ' ') }} €</td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+        @endif
     </div>
 
-    {{-- ── Chart top contributeurs ─────────────────────────────────────── --}}
-    @if ($topContributeurs->isNotEmpty())
-        <script>
-            new Chart(document.getElementById('chart-contributeurs'), {
-                type: 'bar',
-                data: {
-                    labels: @json($topContributeurs->pluck('nom')),
-                    datasets: [{
-                        label: 'Heures pointées',
-                        data: @json($topContributeurs->pluck('heures')),
-                        backgroundColor: 'rgba(56, 189, 248, 0.6)',
-                        borderColor: 'rgba(56, 189, 248, 1)',
-                        borderWidth: 1,
-                    }],
-                },
-                options: {
-                    indexAxis: 'y',
-                    responsive: true,
-                    plugins: { legend: { display: false } },
-                    scales: {
-                        x: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' }, beginAtZero: true },
-                        y: { ticks: { color: '#e2e8f0' }, grid: { color: '#334155' } },
-                    },
-                },
-            });
-        </script>
-    @endif
+    {{-- ── Top matériel (location/utilisation) ─────────────────────────── --}}
+    <div class="card" style="margin-bottom:16px;">
+        <h2>Matériel — heures × tarif (Top 10)</h2>
+        @if ($topMateriel->isEmpty())
+            <p class="muted">
+                @if (!$matTable)
+                    Aucune table de pointage matériel synchronisée. Ajoutez
+                    <code>p_pointage_materiel_location</code> ou <code>P_Pointage_Materiel</code>
+                    dans <a href="{{ route('admin.hfsql.tables') }}">Admin → Tables à synchroniser</a>.
+                @else
+                    Aucun pointage matériel trouvé pour ce projet dans <code>{{ $matTable }}</code>.
+                @endif
+            </p>
+        @else
+            <table>
+                <thead>
+                    <tr>
+                        <th>Matériel</th>
+                        <th style="text-align:right;">Heures</th>
+                        <th style="text-align:right;">Tarif horaire</th>
+                        <th style="text-align:right;">Coût matériel</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach ($topMateriel as $m)
+                        <tr>
+                            <td>{{ $m['nom'] }}</td>
+                            <td style="text-align:right;">{{ number_format($m['heures'], 2, ',', ' ') }} h</td>
+                            <td style="text-align:right;{{ $m['tarif'] == 0 ? 'color:var(--err);' : '' }}">
+                                {{ $m['tarif'] > 0 ? number_format($m['tarif'], 2, ',', ' ') . ' €' : '— tarif manquant' }}
+                            </td>
+                            <td style="text-align:right;font-weight:600;">{{ number_format($m['cout'], 2, ',', ' ') }} €</td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+        @endif
+    </div>
+
+    {{-- ── Dépensé par famille (S_Com_Suivi_Element) — placeholder ────── --}}
+    <div class="card" style="margin-bottom:16px;">
+        <h2>Dépensé par famille (S_Com_Suivi_Element)</h2>
+        @if ($depenseParFamille->isEmpty())
+            <p class="muted">
+                @if (\Illuminate\Support\Facades\DB::table('hfsql_raw_rows')->where('table_name','S_Com_Suivi_Element')->exists())
+                    Aucune dépense enregistrée pour ce projet dans <code>S_Com_Suivi_Element</code>.
+                @else
+                    Table <code>S_Com_Suivi_Element</code> non encore synchronisée — à activer dans <a href="{{ route('admin.hfsql.tables') }}">Admin → Tables à synchroniser</a>.
+                @endif
+            </p>
+        @else
+            <p class="muted" style="font-size:12px;">{{ $depenseParFamille->count() }} ligne(s) brute(s) — mapping vente/achat × famille à finaliser dès que la structure réelle est identifiée.</p>
+        @endif
+    </div>
 @endsection
