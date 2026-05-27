@@ -199,31 +199,28 @@ class AdminController extends Controller
 
     /**
      * True si une sync est considérée comme active.
-     * Compte un "running" en DB mis à jour il y a moins de 60s (heartbeat).
+     * Compte un "running" en DB mis à jour il y a moins de 5 min (heartbeat).
      */
     private function syncJobAlive(): bool
     {
-        $threshold = now()->subSeconds(60);
+        $threshold = now()->subSeconds(300);
         return HfsqlSyncRun::where('status', 'running')
-            ->where(function ($q) use ($threshold) {
-                $q->where('started_at', '>=', $threshold)
-                  ->orWhereNotNull('finished_at'); // jamais vrai (sécurité)
-            })
+            ->where('started_at', '>=', $threshold)
             ->exists();
     }
 
     public function syncStatusJson()
     {
         // Détection "sync vivante" par heartbeat DB : la commande met à jour
-        // hfsql_sync_runs.started_at entre chaque batch. Si l'enregistrement
-        // "running" n'a pas bougé depuis 90s, on considère le job mort.
-        $threshold = now()->subSeconds(90);
+        // hfsql_sync_runs.started_at toutes les 30s. Si pas de mise à jour
+        // depuis 5 min, on considère le job mort.
+        $threshold = now()->subSeconds(300);
         HfsqlSyncRun::where('status', 'running')
             ->where('started_at', '<', $threshold)
             ->update([
                 'status'      => 'error',
                 'finished_at' => now(),
-                'error'       => 'job interrompu — heartbeat absent depuis 90s',
+                'error'       => 'job interrompu — heartbeat absent depuis 5 min (worker tué ? timeout queue ?)',
             ]);
         $running = HfsqlSyncRun::where('status', 'running')->orderByDesc('id')->first();
         $isProcessLive = $running !== null;
