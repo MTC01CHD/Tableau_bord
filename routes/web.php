@@ -49,6 +49,8 @@ Route::middleware([AuthUser::class, ResolveTenant::class])->group(function () {
 
         Route::get('/hfsql/tables', [AdminController::class, 'tablesIndex'])->name('hfsql.tables');
         Route::post('/hfsql/tables', [AdminController::class, 'tablesSave'])->name('hfsql.tables.save');
+        Route::get('/hfsql/tables/{table}/columns', [AdminController::class, 'tableColumns'])
+            ->where('table', '[A-Za-z0-9_]+')->name('hfsql.tables.columns');
 
         Route::get('/sync', [AdminController::class, 'syncIndex'])->name('sync');
         Route::post('/sync', [AdminController::class, 'syncTrigger'])->name('sync.trigger');

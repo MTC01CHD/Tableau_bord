@@ -67,24 +67,25 @@
                                 <td><input type="checkbox" name="tables[]" value="{{ $name }}" {{ $l && $l->enabled ? 'checked' : '' }}></td>
                                 <td><code>{{ $name }}</code></td>
                                 <td>
-                                    @if (empty($cols))
-                                        <span class="muted" style="font-size:11px;font-style:italic;">
-                                            colonnes inconnues — cochez la table puis « Enregistrer » pour les charger
-                                        </span>
-                                        <input type="hidden" name="date_columns[{{ $name }}]" value="{{ $l->date_column ?? '' }}">
-                                    @else
-                                        <select name="date_columns[{{ $name }}]"
-                                                style="min-width:220px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:monospace;">
-                                            <option value="">— full refresh (pas de filtre date) —</option>
-                                            @foreach ($cols as $c)
-                                                <option value="{{ $c }}"
-                                                    {{ $c === $current ? 'selected' : '' }}
-                                                    {{ $sug && $c === $sug ? 'data-suggested=1' : '' }}>
-                                                    {{ $c }}{{ $sug && $c === $sug ? '  ← suggéré' : '' }}
-                                                </option>
-                                            @endforeach
-                                        </select>
-                                    @endif
+                                    <div class="date-col-cell" data-table="{{ $name }}" data-current="{{ $l->date_column ?? '' }}">
+                                        @if (empty($cols))
+                                            <button type="button" class="load-cols-btn"
+                                                    style="background:transparent;border:1px dashed var(--border);color:var(--accent);font-size:11px;padding:3px 8px;cursor:pointer;">
+                                                🔎 charger colonnes
+                                            </button>
+                                            <input type="hidden" name="date_columns[{{ $name }}]" value="{{ $l->date_column ?? '' }}">
+                                        @else
+                                            <select name="date_columns[{{ $name }}]"
+                                                    style="min-width:220px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:monospace;">
+                                                <option value="">— full refresh (pas de filtre date) —</option>
+                                                @foreach ($cols as $c)
+                                                    <option value="{{ $c }}" {{ $c === $current ? 'selected' : '' }}>
+                                                        {{ $c }}{{ $sug && $c === $sug ? '  ← suggéré' : '' }}
+                                                    </option>
+                                                @endforeach
+                                            </select>
+                                        @endif
+                                    </div>
                                 </td>
                                 <td style="text-align:right;">{{ $row ? number_format($row->n, 0, ',', ' ') : '—' }}</td>
                                 <td class="muted">{{ $row ? \Illuminate\Support\Carbon::parse($row->last_sync)->diffForHumans() : '—' }}</td>
@@ -112,6 +113,48 @@
         });
         document.getElementById('unselect-all')?.addEventListener('click', () => {
             rows.forEach(r => r.querySelector('input[type=checkbox]').checked = false);
+        });
+
+        // Chargement à la demande des colonnes (AJAX agent) — évite de spammer
+        // l'agent au chargement de la page.
+        document.body.addEventListener('click', async (e) => {
+            const btn = e.target.closest('.load-cols-btn');
+            if (!btn) return;
+            const cell = btn.closest('.date-col-cell');
+            const table = cell.dataset.table;
+            const current = cell.dataset.current || '';
+            btn.disabled = true;
+            btn.textContent = '⏳ chargement…';
+            try {
+                const r = await fetch(`/admin/hfsql/tables/${encodeURIComponent(table)}/columns`, {
+                    headers: { Accept: 'application/json' }
+                });
+                const d = await r.json();
+                if (!d.ok || !d.columns?.length) {
+                    btn.textContent = '❌ ' + (d.error?.substring(0, 40) || 'aucune colonne');
+                    btn.style.color = 'var(--err)';
+                    return;
+                }
+                // Construit le select avec les colonnes reçues
+                const guesses = ['DateHeureModification', 'Modification_date', 'DateModif'];
+                let suggested = guesses.find(g => d.columns.some(c => c.toLowerCase() === g.toLowerCase()))
+                             || d.columns.find(c => /date/i.test(c)) || '';
+                const sel = document.createElement('select');
+                sel.name = `date_columns[${table}]`;
+                sel.style.cssText = 'min-width:220px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:monospace;';
+                sel.innerHTML =
+                    `<option value="">— full refresh (pas de filtre date) —</option>` +
+                    d.columns.map(c => {
+                        const isCur = c === current;
+                        const isSug = c === suggested;
+                        return `<option value="${c}" ${isCur ? 'selected' : ''}>${c}${isSug ? '  ← suggéré' : ''}</option>`;
+                    }).join('');
+                cell.innerHTML = '';
+                cell.appendChild(sel);
+            } catch (err) {
+                btn.textContent = '❌ erreur réseau';
+                btn.style.color = 'var(--err)';
+            }
         });
     </script>
 @endsection

@@ -182,13 +182,30 @@ class HfsqlSyncCommand extends Command
             $buffer = [];
             $lastHeartbeat = microtime(true);
 
+            $lastCancelCheck = microtime(true);
             foreach ($hfsql->streamRows($table, null, $max, $since, $dateCol, $until) as $row) {
                 $pulled++;
                 $key = $this->resolveKey($row, $table, $forcedKey, $pulled);
 
-                if (microtime(true) - $lastHeartbeat > 30) {
+                // Heartbeat ET check annulation toutes les 5s pour réactivité.
+                if (microtime(true) - $lastHeartbeat > 5) {
                     $run->update(['started_at' => now(), 'rows_pulled' => $pulled]);
                     $lastHeartbeat = microtime(true);
+                }
+                if (microtime(true) - $lastCancelCheck > 5) {
+                    if ($this->isCancelRequested()) {
+                        if (!empty($buffer) && !$dry) $upserted += $this->flush(array_values($buffer));
+                        $run->update([
+                            'finished_at'   => now(),
+                            'rows_pulled'   => $pulled,
+                            'rows_upserted' => $upserted,
+                            'status'        => 'error',
+                            'error'         => 'annulé depuis l\'admin (mid-stream)',
+                        ]);
+                        $this->warn("   ⏹ annulation reçue pendant {$table} — {$upserted} upserts effectués");
+                        return false;
+                    }
+                    $lastCancelCheck = microtime(true);
                 }
 
                 $json = json_encode($row, JSON_UNESCAPED_UNICODE);

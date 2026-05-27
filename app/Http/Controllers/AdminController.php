@@ -82,29 +82,15 @@ class AdminController extends Controller
             ->keyBy('table_name');
 
         // Pour chaque table : colonnes réelles + suggestion auto.
-        // 1) Si données locales en base → extrait du payload JSONB (instantané).
-        // 2) Sinon, pour les tables sélectionnées seulement → appel agent (limité).
+        // Colonnes UNIQUEMENT depuis les données locales (instantané, pas d'appel agent).
+        // Pour les tables non encore sync : input texte libre via route AJAX dédiée.
         $columns     = [];
         $suggestions = [];
-        $agentCalls  = 0;
-        $maxAgentCalls = 10;
         foreach ($remote as $name) {
             $cols = $this->columnsFromLocal($name);
-            if (empty($cols) && ($local[$name]->enabled ?? false) && $agentCalls < $maxAgentCalls) {
-                try {
-                    $cols = array_values(array_filter(array_map(
-                        fn ($c) => $c['name'] ?? null,
-                        $hfsql->getColumns($name)
-                    )));
-                    $agentCalls++;
-                } catch (\Throwable) {
-                    $cols = [];
-                }
-            }
             sort($cols);
             $columns[$name] = $cols;
 
-            // Suggestion : 1) valeur déjà enregistrée, 2) heuristique sur les colonnes
             $existing = $local->get($name)?->date_column;
             $suggestions[$name] = $existing && in_array($existing, $cols, true)
                 ? $existing
@@ -112,6 +98,21 @@ class AdminController extends Controller
         }
 
         return view('admin.hfsql.tables', compact('remote', 'local', 'rows', 'remoteError', 'suggestions', 'columns'));
+    }
+
+    /** Endpoint AJAX : charge les colonnes d'une table à la demande depuis l'agent. */
+    public function tableColumns(Request $request, HfsqlService $hfsql, string $table)
+    {
+        try {
+            $cols = array_values(array_filter(array_map(
+                fn ($c) => $c['name'] ?? null,
+                $hfsql->getColumns($table)
+            )));
+            sort($cols);
+            return response()->json(['ok' => true, 'columns' => $cols]);
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => $e->getMessage()], 200);
+        }
     }
 
     /**
@@ -255,12 +256,31 @@ class AdminController extends Controller
 
     public function syncStop()
     {
-        if (!$this->syncJobAlive()) {
-            return back()->with('status', 'Aucun sync en cours.');
-        }
-        // Drapeau lu par la commande entre chaque batch — arrêt propre.
+        // 1) Supprime les jobs HfsqlSyncJob encore en file (pas encore pris par un worker)
+        //    On filtre sur le payload qui contient le nom de la classe.
+        $pendingDeleted = DB::table('jobs')
+            ->where('queue', 'default')
+            ->where('payload', 'LIKE', '%HfsqlSyncJob%')
+            ->delete();
+
+        // 2) Pour le job déjà en cours d'exécution : drapeau DB lu entre batches.
         PlatformSetting::set('sync_cancel_requested', '1');
-        return back()->with('status', '⏹ Demande d\'arrêt enregistrée. La sync s\'interrompra entre 2 batches (quelques secondes). Vous pourrez ensuite « Reprendre ».');
+
+        // 3) Marque immédiatement les "running" comme aborted (l'UI passe à "inactif"
+        //    dès le prochain refresh JSON, sans attendre 5 min).
+        //    Le job en cours finira son batch courant puis terminera proprement.
+        $marked = HfsqlSyncRun::where('status', 'running')->update([
+            'status'      => 'error',
+            'finished_at' => now(),
+            'error'       => 'arrêté manuellement depuis l\'admin',
+        ]);
+
+        $msg = "⏹ Arrêt demandé.";
+        if ($pendingDeleted) $msg .= " {$pendingDeleted} job(s) en attente supprimé(s).";
+        if ($marked)         $msg .= " {$marked} run(s) marqué(s) interrompu(s).";
+        $msg .= " Le sync en cours s'interrompra dans les ~30 prochaines secondes.";
+
+        return back()->with('status', $msg);
     }
 
     /**
