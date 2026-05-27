@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\HfsqlSyncJob;
 use App\Models\HfsqlSyncRun;
 use App\Models\HfsqlTable;
 use App\Models\PlatformSetting;
@@ -237,9 +238,10 @@ class AdminController extends Controller
         PlatformSetting::set('sync_cancel_requested', null);
 
         $resume = $request->boolean('resume');
-        // Dispatch via queue — un worker (Laravel Cloud "Worker" ou
-        // `php artisan queue:work` en local) le traitera.
-        Artisan::queue('hfsql:sync', $resume ? ['--resume' => true] : []);
+        // On dispatche un Job dédié dont le timeout est défini dans la classe
+        // (3600s) — comme ça pas besoin de modifier la cmd `queue:work` du
+        // worker Laravel Cloud pour avoir un long sync.
+        HfsqlSyncJob::dispatch($resume);
 
         return back()->with('status', $resume
             ? 'Reprise du sync mise en file. Un worker va l\'exécuter dans quelques secondes.'
