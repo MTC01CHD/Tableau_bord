@@ -24,12 +24,12 @@ class DashboardController extends Controller
         $term  = $request->string('q')->toString() ?: null;
         $etat  = $request->string('etat')->toString() ?: null;
         $only  = $request->boolean('actifs', true);
+        $derapagesOnly = $request->boolean('derapages');
+        $sort  = $request->string('sort')->toString() ?: 'nom';
 
         $base = Projet::query();
         if ($only) $base->actifs();
         $base->search($term)->etat($etat);
-
-        $projets = $base->orderByRaw("payload->>'Nom'")->paginate(25)->withQueryString();
 
         // ── Agrégats par projet (un seul SQL chacun, lookup par IDProjet) ──
         // Σ vendu par projet (depuis S_Tache.Somme_V)
@@ -115,6 +115,28 @@ class DashboardController extends Controller
             ->values()
             ->all();
 
+        // Filtre "dérapages seulement" : on filtre la query par les IDs en dépassement
+        if ($derapagesOnly) {
+            $derapageIds = $realisesParProjet->filter(function ($r, $pid) use ($ventesParProjet) {
+                return (float) $r > (float) ($ventesParProjet[$pid] ?? 0);
+            })->keys()->all();
+            if (!empty($derapageIds)) {
+                $base->whereRaw("(payload->>'IDProjet')::int = ANY(?)", ['{' . implode(',', $derapageIds) . '}']);
+            } else {
+                $base->whereRaw('1=0'); // aucun dérapage → résultat vide
+            }
+        }
+
+        // Tri (les tris par valeurs agrégées se font côté view sur la page courante)
+        $sortMap = [
+            'nom'        => "payload->>'Nom' ASC",
+            'numero'     => "payload->>'numero' ASC",
+            'date_debut' => "payload->>'DateDeDebut' DESC NULLS LAST",
+            'date_fin'   => "payload->>'DateDeFin' DESC NULLS LAST",
+        ];
+        $orderClause = $sortMap[$sort] ?? $sortMap['nom'];
+        $projets = $base->orderByRaw($orderClause)->paginate(25)->withQueryString();
+
         // Liste des états avec libellé pour le filtre
         $etats = Projet::query()
             ->selectRaw("payload->>'Etat_Code' as etat, COUNT(*) as n")
@@ -130,6 +152,7 @@ class DashboardController extends Controller
 
         return view('dashboard.index', compact(
             'projets', 'stats', 'etats', 'syncStatus', 'term', 'etat', 'only',
+            'derapagesOnly', 'sort',
             'ventesParProjet', 'realisesParProjet',
             'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
             'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise'

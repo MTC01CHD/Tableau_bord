@@ -128,8 +128,20 @@
                 </select>
             </div>
             <div>
+                <label class="muted" style="font-size:11px;display:block;margin-bottom:4px;">Tri</label>
+                <select name="sort" style="padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+                    <option value="nom"        {{ $sort === 'nom'        ? 'selected' : '' }}>Nom (A-Z)</option>
+                    <option value="numero"     {{ $sort === 'numero'     ? 'selected' : '' }}>N° projet</option>
+                    <option value="date_debut" {{ $sort === 'date_debut' ? 'selected' : '' }}>Date début (récent)</option>
+                    <option value="date_fin"   {{ $sort === 'date_fin'   ? 'selected' : '' }}>Date fin (récent)</option>
+                </select>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;">
                 <label style="font-size:12px;">
                     <input type="checkbox" name="actifs" value="1" {{ $only ? 'checked' : '' }}> Seulement actifs
+                </label>
+                <label style="font-size:12px;color:{{ $derapagesOnly ? 'var(--err)' : 'inherit' }};">
+                    <input type="checkbox" name="derapages" value="1" {{ $derapagesOnly ? 'checked' : '' }}> 🔴 Seulement dérapages
                 </label>
             </div>
             <button type="submit">Filtrer</button>
@@ -152,6 +164,7 @@
                         <th style="text-align:right;" title="Σ Somme_V des tâches">Vendu</th>
                         <th style="text-align:right;" title="Σ Somme_R des tâches">Réalisé</th>
                         <th style="text-align:right;">Marge</th>
+                        <th title="% consommation (Réalisé / Vendu)">Conso</th>
                         <th style="text-align:center;" title="Tâches · Plannings disponibles">Données</th>
                         <th>Début</th>
                         <th></th>
@@ -164,11 +177,13 @@
                             $v = (float) ($ventesParProjet[$pid]   ?? 0);
                             $r = (float) ($realisesParProjet[$pid] ?? 0);
                             $marge = $v - $r;
+                            $pctConso = $v > 0 ? min(round(($r / $v) * 100, 1), 200) : 0;
+                            $isDerapage = $v > 0 && $r > $v;
                             $nbT = (int) ($nbTachesParProjet[$pid]    ?? 0);
                             $nbP = (int) ($nbPlanningsParProjet[$pid] ?? 0);
                             $etatLib = $libellesEtats[$p->etat] ?? $p->etat;
                         @endphp
-                        <tr>
+                        <tr style="{{ $isDerapage ? 'background: rgba(239,68,68,0.06);' : '' }}">
                             <td><code>{{ $p->numero }}</code></td>
                             <td><strong>{{ \Illuminate\Support\Str::limit($p->nom, 40) }}</strong></td>
                             <td>
@@ -178,6 +193,21 @@
                             <td style="text-align:right;">{{ $r > 0 ? number_format($r, 0, ',', ' ') . ' €' : '—' }}</td>
                             <td style="text-align:right;{{ $marge != 0 ? 'color:' . ($marge >= 0 ? 'var(--ok)' : 'var(--err)') . ';font-weight:600;' : '' }}">
                                 {{ ($v > 0 || $r > 0) ? number_format($marge, 0, ',', ' ') . ' €' : '—' }}
+                            </td>
+                            <td style="min-width:120px;">
+                                @if ($v > 0)
+                                    <div style="display:flex;align-items:center;gap:6px;font-size:11px;">
+                                        <div style="flex:1;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;position:relative;">
+                                            <div style="height:100%;width:{{ min($pctConso, 100) }}%;background:{{ $isDerapage ? 'var(--err)' : ($pctConso >= 80 ? 'var(--warn)' : 'var(--accent)') }};"></div>
+                                            @if ($isDerapage)
+                                                <div style="position:absolute;top:0;right:0;width:{{ min($pctConso - 100, 50) }}%;height:100%;background:repeating-linear-gradient(45deg,var(--err),var(--err) 3px,transparent 3px,transparent 6px);"></div>
+                                            @endif
+                                        </div>
+                                        <span style="font-family:monospace;{{ $isDerapage ? 'color:var(--err);font-weight:600;' : '' }}">{{ $pctConso }}%</span>
+                                    </div>
+                                @else
+                                    <span class="muted" style="font-size:11px;">—</span>
+                                @endif
                             </td>
                             <td style="text-align:center;font-size:11px;color:var(--muted);">
                                 <span title="{{ $nbT }} tâche(s)" style="color:{{ $nbT > 0 ? 'var(--ok)' : 'var(--muted)' }};">📋 {{ $nbT }}</span>
