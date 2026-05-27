@@ -25,3 +25,8 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Source/archives de référence T-REPORT (ne pas pousser sur GitHub)
+/T-REPORT-main.zip
+/t-report-source/
+/zip
