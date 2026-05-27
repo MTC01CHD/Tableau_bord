@@ -134,6 +134,13 @@ class HfsqlSyncCommand extends Command
                 break;
             }
             $globalOk = $this->syncTable($hfsql, $table, $forcedKey, $max, $dry) && $globalOk;
+
+            // Libération mémoire agressive entre 2 tables — évite l'OOM sur les
+            // bases massives (les buffers JSONB peuvent grimper vite).
+            if (function_exists('gc_collect_cycles')) {
+                gc_collect_cycles();
+            }
+            $this->line('   mémoire: ' . round(memory_get_usage(true) / 1024 / 1024) . ' MB');
         }
 
         PlatformSetting::set('sync_cancel_requested', null);
@@ -221,7 +228,7 @@ class HfsqlSyncCommand extends Command
                     'synced_at'  => $now,
                 ];
 
-                if (count($buffer) >= 500) {
+                if (count($buffer) >= 100) {
                     if (!$dry) $upserted += $this->flush(array_values($buffer));
                     $buffer = [];
 
