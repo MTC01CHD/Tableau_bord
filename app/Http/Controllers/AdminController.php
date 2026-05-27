@@ -170,82 +170,63 @@ class AdminController extends Controller
 
     public function syncTrigger(Request $request)
     {
-        if ($this->syncProcessAlive()) {
+        if ($this->syncJobAlive()) {
             return back()->with('status', '⚠️ Un sync est déjà en cours. Utilisez « Arrêter » d\'abord.');
         }
 
+        // Reset éventuelle demande d'annulation précédente
+        PlatformSetting::set('sync_cancel_requested', null);
+
         $resume = $request->boolean('resume');
-        $php = PHP_BINARY;
-        $artisan = base_path('artisan');
-        $log = storage_path('logs/hfsql-sync-manual.log');
-        $flag = $resume ? ' --resume' : '';
-        $cmd = sprintf('%s %s hfsql:sync%s > %s 2>&1 &',
-            escapeshellarg($php), escapeshellarg($artisan), $flag, escapeshellarg($log));
-        exec($cmd);
+        // Dispatch via queue — un worker (Laravel Cloud "Worker" ou
+        // `php artisan queue:work` en local) le traitera.
+        Artisan::queue('hfsql:sync', $resume ? ['--resume' => true] : []);
+
         return back()->with('status', $resume
-            ? 'Reprise du sync lancée — ne refait que les tables non OK.'
-            : 'Synchronisation lancée. La page se rafraîchit en live.');
+            ? 'Reprise du sync mise en file. Un worker va l\'exécuter dans quelques secondes.'
+            : 'Synchronisation mise en file. Un worker va l\'exécuter dans quelques secondes.');
     }
 
     public function syncStop()
     {
-        $pids = $this->syncPids();
-        if (empty($pids)) {
+        if (!$this->syncJobAlive()) {
             return back()->with('status', 'Aucun sync en cours.');
         }
-        foreach ($pids as $pid) {
-            // SIGTERM d'abord (propre), si toujours là après 2s on SIGKILL
-            @posix_kill((int) $pid, 15);
-        }
-        sleep(2);
-        foreach ($this->syncPids() as $pid) {
-            @posix_kill((int) $pid, 9);
-        }
-        // Marque les "running" orphelins en error
-        HfsqlSyncRun::where('status', 'running')->update([
-            'status'      => 'error',
-            'finished_at' => now(),
-            'error'       => 'arrêté manuellement depuis l\'admin',
-        ]);
-        return back()->with('status', '⏹ Sync arrêté (' . count($pids) . ' process tué·s). Vous pouvez « Reprendre » pour ne refaire que les manquantes.');
+        // Drapeau lu par la commande entre chaque batch — arrêt propre.
+        PlatformSetting::set('sync_cancel_requested', '1');
+        return back()->with('status', '⏹ Demande d\'arrêt enregistrée. La sync s\'interrompra entre 2 batches (quelques secondes). Vous pourrez ensuite « Reprendre ».');
     }
 
-    /** True si au moins un process `php artisan hfsql:sync` tourne actuellement. */
-    private function syncProcessAlive(): bool
+    /**
+     * True si une sync est considérée comme active.
+     * Compte un "running" en DB mis à jour il y a moins de 60s (heartbeat).
+     */
+    private function syncJobAlive(): bool
     {
-        return !empty($this->syncPids());
-    }
-
-    /** Retourne les PIDs des process artisan hfsql:sync (hors shell wrappers). */
-    private function syncPids(): array
-    {
-        $out = [];
-        // -f matche la ligne de commande, -x pour matcher exactement /usr/bin/phpX.Y artisan hfsql:sync
-        @exec("pgrep -af 'artisan hfsql:sync' 2>/dev/null", $lines);
-        foreach ($lines as $line) {
-            // On filtre les bash/grep/pgrep eux-mêmes : on garde les lignes contenant "php" en début
-            if (preg_match('/^(\d+)\s+\S*php\S*\s+\S*artisan\s+hfsql:sync/', $line, $m)) {
-                $out[] = $m[1];
-            }
-        }
-        return $out;
+        $threshold = now()->subSeconds(60);
+        return HfsqlSyncRun::where('status', 'running')
+            ->where(function ($q) use ($threshold) {
+                $q->where('started_at', '>=', $threshold)
+                  ->orWhereNotNull('finished_at'); // jamais vrai (sécurité)
+            })
+            ->exists();
     }
 
     public function syncStatusJson()
     {
-        $isProcessLive = $this->syncProcessAlive();
-
-        // Si pas de process vivant mais un "running" orphelin en DB → on le nettoie
-        if (!$isProcessLive) {
-            HfsqlSyncRun::where('status', 'running')->update([
-                'status' => 'error',
+        // Détection "sync vivante" par heartbeat DB : la commande met à jour
+        // hfsql_sync_runs.started_at entre chaque batch. Si l'enregistrement
+        // "running" n'a pas bougé depuis 90s, on considère le job mort.
+        $threshold = now()->subSeconds(90);
+        HfsqlSyncRun::where('status', 'running')
+            ->where('started_at', '<', $threshold)
+            ->update([
+                'status'      => 'error',
                 'finished_at' => now(),
-                'error' => 'process interrompu — orphelin détecté au refresh',
+                'error'       => 'job interrompu — heartbeat absent depuis 90s',
             ]);
-        }
-        $running = $isProcessLive
-            ? HfsqlSyncRun::where('status', 'running')->orderByDesc('id')->first()
-            : null;
+        $running = HfsqlSyncRun::where('status', 'running')->orderByDesc('id')->first();
+        $isProcessLive = $running !== null;
 
         // Liste complète : tables configurées (admin) ∪ tables présentes en base.
         $configured = HfsqlTable::orderBy('name')->get()->keyBy('name');
