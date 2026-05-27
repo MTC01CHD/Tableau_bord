@@ -31,22 +31,113 @@ class DashboardController extends Controller
 
         $projets = $base->orderByRaw("payload->>'Nom'")->paginate(25)->withQueryString();
 
+        // ── Agrégats par projet (un seul SQL chacun, lookup par IDProjet) ──
+        // Σ vendu par projet (depuis S_Tache.Somme_V)
+        $ventesParProjet = $this->rawRows()
+            ->where('table_name', 'S_Tache')
+            ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_V')::numeric, 0)) AS s")
+            ->groupBy('pid')
+            ->pluck('s', 'pid');
+        // Σ réalisé par projet (depuis S_Tache.Somme_R)
+        $realisesParProjet = $this->rawRows()
+            ->where('table_name', 'S_Tache')
+            ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_R')::numeric, 0)) AS s")
+            ->groupBy('pid')
+            ->pluck('s', 'pid');
+        // Nombre de tâches par projet (indicateur "y a-t-il quelque chose à voir ?")
+        $nbTachesParProjet = $this->rawRows()
+            ->where('table_name', 'S_Tache')
+            ->selectRaw("(payload->>'IDProjet')::int AS pid, COUNT(*) AS n")
+            ->groupBy('pid')
+            ->pluck('n', 'pid');
+        // Nombre de plannings par projet
+        $nbPlanningsParProjet = $this->rawRows()
+            ->where('table_name', 'P_Planning')
+            ->selectRaw("(payload->>'IDProjet')::int AS pid, COUNT(*) AS n")
+            ->groupBy('pid')
+            ->pluck('n', 'pid');
+
+        // Lookup libellés d'état
+        $libellesEtats = $this->rawRows()
+            ->where('table_name', 'S_Projet_etat')
+            ->get()
+            ->mapWithKeys(function ($r) {
+                $p = $this->jsonRow($r->payload);
+                return [$p['Etat_Code'] ?? '' => $p['Descriptif'] ?? ''];
+            })
+            ->filter(fn ($v, $k) => $k !== '');
+
+        // ── KPI portfolio ──────────────────────────────────────────────────
+        $totalVendu   = (float) $ventesParProjet->sum();
+        $totalRealise = (float) $realisesParProjet->sum();
+        $totalMarge   = $totalVendu - $totalRealise;
+
+        // Top 5 dérapages (réalisé > vendu) parmi les projets actifs
+        $projetsActifsIds = Projet::actifs()
+            ->selectRaw("(payload->>'IDProjet')::int AS pid")
+            ->pluck('pid');
+
+        $derapages = $projetsActifsIds
+            ->mapWithKeys(fn ($pid) => [$pid => (float) ($realisesParProjet[$pid] ?? 0) - (float) ($ventesParProjet[$pid] ?? 0)])
+            ->filter(fn ($delta) => $delta > 0)
+            ->sortDesc()
+            ->take(5);
+        // Top 5 mieux maîtrisés (plus grosse marge en €)
+        $topMarge = $projetsActifsIds
+            ->mapWithKeys(fn ($pid) => [$pid => (float) ($ventesParProjet[$pid] ?? 0) - (float) ($realisesParProjet[$pid] ?? 0)])
+            ->filter(fn ($m) => $m > 0)
+            ->sortDesc()
+            ->take(5);
+
+        $derapagesEnriched = $this->enrichTopProjets($derapages, 'depassement', $ventesParProjet, $realisesParProjet);
+        $topMargeEnriched  = $this->enrichTopProjets($topMarge,  'marge',         $ventesParProjet, $realisesParProjet);
+
         $stats = [
             'total_projets'    => Projet::count(),
             'projets_actifs'   => Projet::actifs()->count(),
+            'total_vendu'      => $totalVendu,
+            'total_realise'    => $totalRealise,
+            'total_marge'      => $totalMarge,
+            'nb_derapages'     => $derapages->count(),
             'heures_prevues'   => (float) Projet::actifs()
                 ->sum(DB::raw("(payload->>'HeuresPrevues')::numeric")),
         ];
 
+        // Liste des états avec libellé pour le filtre
         $etats = Projet::query()
             ->selectRaw("payload->>'Etat_Code' as etat, COUNT(*) as n")
             ->groupBy('etat')
             ->orderByDesc('n')
-            ->get();
+            ->get()
+            ->map(function ($e) use ($libellesEtats) {
+                $e->libelle = $libellesEtats[$e->etat] ?? $e->etat;
+                return $e;
+            });
 
         $syncStatus = $this->syncStatus();
 
-        return view('dashboard.index', compact('projets', 'stats', 'etats', 'syncStatus', 'term', 'etat', 'only'));
+        return view('dashboard.index', compact(
+            'projets', 'stats', 'etats', 'syncStatus', 'term', 'etat', 'only',
+            'ventesParProjet', 'realisesParProjet',
+            'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
+            'derapagesEnriched', 'topMargeEnriched'
+        ));
+    }
+
+    /** Enrichit un top (id => valeur) avec nom + numéro du projet. */
+    private function enrichTopProjets($collection, string $valueKey, $ventes, $realises): \Illuminate\Support\Collection
+    {
+        return collect($collection)->map(function ($val, $pid) use ($valueKey, $ventes, $realises) {
+            $p = Projet::query()->whereRaw("(payload->>'IDProjet')::int = ?", [$pid])->first();
+            return [
+                'id'        => $pid,
+                'nom'       => $p?->nom ?? "Projet #{$pid}",
+                'numero'    => $p?->numero ?? '',
+                'vendu'     => (float) ($ventes[$pid] ?? 0),
+                'realise'   => (float) ($realises[$pid] ?? 0),
+                $valueKey   => round($val, 2),
+            ];
+        })->values();
     }
 
     public function projet(int $id)
