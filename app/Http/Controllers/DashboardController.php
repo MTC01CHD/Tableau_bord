@@ -103,6 +103,18 @@ class DashboardController extends Controller
                 ->sum(DB::raw("(payload->>'HeuresPrevues')::numeric")),
         ];
 
+        // Données pré-formatées pour le bar chart Vendu vs Réalisé (top 10)
+        $chartVenduRealise = $ventesParProjet
+            ->map(fn ($v, $pid) => [
+                'pid'     => (int) $pid,
+                'vendu'   => (float) $v,
+                'realise' => (float) ($realisesParProjet[$pid] ?? 0),
+            ])
+            ->sortByDesc('vendu')
+            ->take(10)
+            ->values()
+            ->all();
+
         // Liste des états avec libellé pour le filtre
         $etats = Projet::query()
             ->selectRaw("payload->>'Etat_Code' as etat, COUNT(*) as n")
@@ -120,7 +132,7 @@ class DashboardController extends Controller
             'projets', 'stats', 'etats', 'syncStatus', 'term', 'etat', 'only',
             'ventesParProjet', 'realisesParProjet',
             'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
-            'derapagesEnriched', 'topMargeEnriched'
+            'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise'
         ));
     }
 

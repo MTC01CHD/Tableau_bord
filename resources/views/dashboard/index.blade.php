@@ -206,17 +206,7 @@
         }
 
         // ── Bar chart Vendu vs Réalisé (top 10 par vendu) ──
-        const topProjects = @json(
-            $ventesParProjet
-                ->map(fn ($v, $pid) => [
-                    'pid' => $pid,
-                    'vendu' => (float) $v,
-                    'realise' => (float) ($realisesParProjet[$pid] ?? 0)
-                ])
-                ->sortByDesc('vendu')
-                ->take(10)
-                ->values()
-        );
+        const topProjects = @json($chartVenduRealise);
         if (topProjects.length > 0) {
             const labels = topProjects.map(p => '#' + p.pid);
             new Chart(document.getElementById('chart-vendu-realise'), {
