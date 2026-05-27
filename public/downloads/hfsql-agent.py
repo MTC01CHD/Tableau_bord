@@ -207,13 +207,19 @@ class HFSQLHandler(BaseHTTPRequestHandler):
         print(f"[{self.address_string()}] {format % args}")
 
     def send_json(self, data, status=200):
-        body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError) as e:
+            # Client (Laravel Cloud worker / ngrok) a fermé la connexion avant
+            # qu'on ait fini d'écrire — c'est habituellement un timeout côté client
+            # sur une réponse longue. On log discrètement, sans crash.
+            print(f"[client disconnected] {type(e).__name__} after generating response — ignored")
 
     def send_error_json(self, message, status=500):
         self.send_json({"error": message}, status)
@@ -241,7 +247,7 @@ class HFSQLHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
 
         if path in ("/", "/ping"):
-            self.send_json({"ok": True, "agent": "Tableau_bord HFSQL Agent", "version": "3.3"})
+            self.send_json({"ok": True, "agent": "Tableau_bord HFSQL Agent", "version": "3.4"})
             return
 
         if path == "/debug":
@@ -294,7 +300,7 @@ class HFSQLHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     # ThreadingHTTPServer : un /rows long ne bloque pas /ping ni /tables.
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), HFSQLHandler)
-    print(f"Tableau_bord HFSQL Agent v3.3 (threaded, since+until) — http://{LISTEN_HOST}:{LISTEN_PORT}")
+    print(f"Tableau_bord HFSQL Agent v3.4 (threaded, since+until, broken-pipe safe) — http://{LISTEN_HOST}:{LISTEN_PORT}")
     print(f"Base : {HFSQL_SERVER}:{HFSQL_PORT}/{HFSQL_DATABASE}")
     print(f"Clé  : {AGENT_KEY[:8]}... (max_rows={MAX_ROWS})")
     print("Ctrl+C pour arrêter")

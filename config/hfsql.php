@@ -31,7 +31,7 @@ return [
     ],
 
     'sync' => [
-        'batch_size'   => (int) env('HFSQL_SYNC_BATCH', 500),
+        'batch_size'   => (int) env('HFSQL_SYNC_BATCH', 100),
         'cron'         => env('HFSQL_SYNC_CRON', '*/15 * * * *'),
         // Liste explicite des tables synchronisées par défaut.
         // Voir config/hfsql-tables.php pour l'édition.
