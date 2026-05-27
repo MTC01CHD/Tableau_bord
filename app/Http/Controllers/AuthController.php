@@ -63,8 +63,14 @@ class AuthController extends Controller
         if (!$user->isSuperAdmin()) {
             abort(403);
         }
-        $data = $request->validate(['tenant_id' => 'required|integer|exists:tenants,id']);
+        $data = $request->validate([
+            'tenant_id'   => 'required|integer|exists:tenants,id',
+            'redirect_to' => 'nullable|string',
+        ]);
         $request->session()->put('current_tenant_id', $data['tenant_id']);
+        if (!empty($data['redirect_to'])) {
+            return redirect($data['redirect_to'])->with('status', 'Tenant courant changé.');
+        }
         return back()->with('status', 'Tenant courant changé.');
     }
 }

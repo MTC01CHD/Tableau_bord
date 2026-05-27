@@ -5,13 +5,26 @@
     <div class="grid grid-2">
         <div class="card">
             <h2>Tenants</h2>
+            @php $currentTenantId = session('current_tenant_id'); @endphp
             <table>
                 <thead>
-                    <tr><th>Nom</th><th>Slug</th><th>Users</th><th>Lignes HFSQL</th><th>Statut</th><th></th></tr>
+                    <tr><th></th><th>Nom</th><th>Slug</th><th>Users</th><th>Lignes HFSQL</th><th>Statut</th><th></th></tr>
                 </thead>
                 <tbody>
                     @forelse ($tenants as $t)
                         <tr>
+                            <td>
+                                @if ($t->id === $currentTenantId)
+                                    <span class="badge ok" title="Tenant courant">✓ courant</span>
+                                @elseif ($t->is_active)
+                                    <form method="POST" action="{{ route('super.switch-tenant') }}" style="margin:0;">
+                                        @csrf
+                                        <input type="hidden" name="tenant_id" value="{{ $t->id }}">
+                                        <input type="hidden" name="redirect_to" value="{{ route('dashboard') }}">
+                                        <button type="submit" style="font-size:11px;padding:3px 10px;background:var(--accent);color:#0f172a;font-weight:600;">Utiliser → dashboard</button>
+                                    </form>
+                                @endif
+                            </td>
                             <td><strong>{{ $t->name }}</strong></td>
                             <td><code>{{ $t->slug }}</code></td>
                             <td>{{ $t->users_count }}</td>
@@ -36,7 +49,7 @@
                             </td>
                         </tr>
                     @empty
-                        <tr><td colspan="6" class="muted">Aucun tenant. Créez-en un à droite.</td></tr>
+                        <tr><td colspan="7" class="muted">Aucun tenant. Créez-en un à droite.</td></tr>
                     @endforelse
                 </tbody>
             </table>
