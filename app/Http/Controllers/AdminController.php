@@ -93,57 +93,71 @@ class AdminController extends Controller
             ->get()
             ->keyBy('table_name');
 
-        // Suggestion auto de colonne date pour chaque table
+        // Pour chaque table : colonnes réelles + suggestion auto.
+        // 1) Si données locales en base → extrait du payload JSONB (instantané).
+        // 2) Sinon, pour les tables sélectionnées seulement → appel agent (limité).
+        $columns     = [];
         $suggestions = [];
+        $agentCalls  = 0;
+        $maxAgentCalls = 10;
         foreach ($remote as $name) {
+            $cols = $this->columnsFromLocal($name);
+            if (empty($cols) && ($local[$name]->enabled ?? false) && $agentCalls < $maxAgentCalls) {
+                try {
+                    $cols = array_values(array_filter(array_map(
+                        fn ($c) => $c['name'] ?? null,
+                        $hfsql->getColumns($name)
+                    )));
+                    $agentCalls++;
+                } catch (\Throwable) {
+                    $cols = [];
+                }
+            }
+            sort($cols);
+            $columns[$name] = $cols;
+
+            // Suggestion : 1) valeur déjà enregistrée, 2) heuristique sur les colonnes
             $existing = $local->get($name)?->date_column;
-            $suggestions[$name] = $existing ?: $this->suggestDateColumn($name);
+            $suggestions[$name] = $existing && in_array($existing, $cols, true)
+                ? $existing
+                : $this->guessDateColumn($cols);
         }
 
-        return view('admin.hfsql.tables', compact('remote', 'local', 'rows', 'remoteError', 'suggestions'));
+        return view('admin.hfsql.tables', compact('remote', 'local', 'rows', 'remoteError', 'suggestions', 'columns'));
     }
 
     /**
-     * Propose une colonne date plausible pour une table HFSQL.
-     *  - Si on a déjà des données en base, on inspecte le payload JSONB et on prend
-     *    la première colonne dont le nom ressemble à une date de modification.
-     *  - Sinon on tombe sur DateHeureModification (convention HFSQL/WinDev standard).
+     * Extrait les colonnes d'une table depuis un échantillon JSONB local (rapide).
      */
-    private function suggestDateColumn(string $table): string
+    private function columnsFromLocal(string $table): array
     {
-        $defaults = ['DateHeureModification', 'Modification_date', 'DateModif', 'DateModification'];
-
-        // Inspection des données réelles
         $sample = DB::table('hfsql_raw_rows')
             ->where('table_name', $table)
             ->limit(1)
             ->value('payload');
+        if (!$sample) return [];
+        $payload = is_string($sample) ? json_decode($sample, true) : (array) $sample;
+        return is_array($payload) ? array_keys($payload) : [];
+    }
 
-        if ($sample) {
-            $payload = is_string($sample) ? json_decode($sample, true) : (array) $sample;
-            if (is_array($payload)) {
-                $keys = array_keys($payload);
-                // Priorité 1 : noms attendus (insensible casse)
-                foreach ($defaults as $d) {
-                    foreach ($keys as $k) {
-                        if (strcasecmp($k, $d) === 0) return $k;
-                    }
-                }
-                // Priorité 2 : toute colonne contenant "modif" + "date" / "heure"
-                foreach ($keys as $k) {
-                    if (preg_match('/modif/i', $k) && preg_match('/date|heure/i', $k)) {
-                        return $k;
-                    }
-                }
-                // Priorité 3 : toute colonne avec "date" dans le nom
-                foreach ($keys as $k) {
-                    if (preg_match('/date/i', $k)) return $k;
-                }
+    /**
+     * Devine la colonne date la plus plausible parmi une liste de colonnes.
+     */
+    private function guessDateColumn(array $cols): ?string
+    {
+        $defaults = ['DateHeureModification', 'Modification_date', 'DateModif', 'DateModification'];
+        foreach ($defaults as $d) {
+            foreach ($cols as $c) {
+                if (strcasecmp($c, $d) === 0) return $c;
             }
         }
-
-        // Fallback convention HFSQL standard
-        return $defaults[0];
+        foreach ($cols as $c) {
+            if (preg_match('/modif/i', $c) && preg_match('/date|heure/i', $c)) return $c;
+        }
+        foreach ($cols as $c) {
+            if (preg_match('/date/i', $c)) return $c;
+        }
+        return null;
     }
 
     public function tablesSave(Request $request)
