@@ -2,14 +2,17 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToTenant;
 use Illuminate\Database\Eloquent\Model;
 
 class HfsqlRawRow extends Model
 {
+    use BelongsToTenant;
+
     public $timestamps = false;
 
     protected $fillable = [
-        'table_name', 'row_key', 'payload', 'synced_at',
+        'tenant_id', 'table_name', 'row_key', 'payload', 'synced_at',
     ];
 
     protected $casts = [

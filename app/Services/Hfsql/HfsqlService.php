@@ -3,35 +3,31 @@
 namespace App\Services\Hfsql;
 
 use App\Models\PlatformSetting;
+use App\Support\TenantContext;
 use Illuminate\Support\Facades\Http;
 use PDO;
 
 /**
- * Service de lecture HFSQL.
+ * Service de lecture HFSQL — scopé au tenant courant.
  *
- * Configuration prioritaire :
- *   1. platform_settings (DB)  ← édité via /admin/hfsql
- *   2. config/hfsql.php → .env (fallback)
+ * Configuration : lue depuis platform_settings (scopé par TenantContext).
+ * Chaque tenant a sa propre URL d'agent / credentials / DSN ODBC.
  *
- * Supporte le mode REST (agent hfsql-agent.py côté Windows) et ODBC (driver HFSQL).
+ * Le cache `hfsql.tables.list` est clé par tenant pour éviter les fuites.
  */
 class HfsqlService
 {
-    /** Lit un paramètre depuis platform_settings, fallback sur config. */
-    private function cfg(string $key, string $configPath, mixed $default = null): mixed
+    public function __construct(private TenantContext $ctx) {}
+
+    private function cfg(string $key, mixed $default = null): mixed
     {
-        try {
-            $v = PlatformSetting::get($key);
-            if ($v !== null && $v !== '') return $v;
-        } catch (\Throwable) {
-            // Table pas encore migrée — on tombe sur la config par défaut
-        }
-        return config($configPath, $default);
+        $v = PlatformSetting::get($key);
+        return ($v !== null && $v !== '') ? $v : $default;
     }
 
     public function mode(): string
     {
-        $m = (string) $this->cfg('hfsql_mode', 'hfsql.mode', 'rest');
+        $m = (string) $this->cfg('hfsql_mode', 'rest');
         return $m === 'webdev' ? 'rest' : $m;
     }
 
@@ -64,7 +60,7 @@ class HfsqlService
     {
         $url = $this->restUrl();
         if (!$url) {
-            return ['ok' => false, 'message' => "URL de l'API REST HFSQL non configurée (HFSQL_API_URL)."];
+            return ['ok' => false, 'message' => "URL de l'API REST HFSQL non configurée pour ce tenant (admin → HFSQL)."];
         }
 
         foreach (['/ping', '/tables'] as $endpoint) {
@@ -94,9 +90,8 @@ class HfsqlService
 
     private function getRestTables(): array
     {
-        // L'agent peut mettre 10-15s à énumérer les ~350 tables ODBC.
-        // On met un timeout généreux et on cache 5 min pour ne pas re-payer ce coût.
-        return cache()->remember('hfsql.tables.list', 300, function () {
+        $cacheKey = 'hfsql.tables.list.' . $this->ctx->requireId();
+        return cache()->remember($cacheKey, 300, function () {
             $r = Http::timeout(30)->withHeaders($this->restHeaders())->get($this->restUrl() . '/tables');
             if (!$r->successful()) return [];
             $d = $r->json();
@@ -259,7 +254,7 @@ class HfsqlService
 
     private function restUrl(): string
     {
-        return rtrim((string) $this->cfg('hfsql_api_url', 'hfsql.rest.url', ''), '/');
+        return rtrim((string) $this->cfg('hfsql_api_url', ''), '/');
     }
 
     private function restHeaders(): array
@@ -269,7 +264,7 @@ class HfsqlService
             'Content-Type'               => 'application/json',
             'ngrok-skip-browser-warning' => 'true',
         ];
-        $key = $this->cfg('hfsql_api_key', 'hfsql.rest.api_key');
+        $key = $this->cfg('hfsql_api_key');
         if (!empty($key)) {
             $h['Authorization'] = 'Bearer ' . $key;
             $h['X-API-Key']     = $key;
@@ -284,15 +279,15 @@ class HfsqlService
 
     private function buildOdbcDsn(): string
     {
-        $dsn = (string) $this->cfg('hfsql_dsn', 'hfsql.odbc.dsn', '');
+        $dsn = (string) $this->cfg('hfsql_dsn', '');
         if ($dsn !== '') {
             if (!str_contains($dsn, '=')) return 'odbc:DSN=' . $dsn . ';';
             return str_starts_with($dsn, 'odbc:') ? $dsn : 'odbc:' . $dsn;
         }
-        $host   = $this->cfg('hfsql_host',     'hfsql.odbc.host');
-        $port   = $this->cfg('hfsql_port',     'hfsql.odbc.port');
-        $db     = $this->cfg('hfsql_database', 'hfsql.odbc.database');
-        $driver = $this->cfg('hfsql_driver',   'hfsql.odbc.driver');
+        $host   = $this->cfg('hfsql_host');
+        $port   = $this->cfg('hfsql_port');
+        $db     = $this->cfg('hfsql_database');
+        $driver = $this->cfg('hfsql_driver', 'HFSQL');
         return "odbc:Driver={{$driver}};Server Name={$host};Server Port={$port};Database={$db};IntegrityCheck=1;";
     }
 
@@ -300,8 +295,8 @@ class HfsqlService
     {
         return new PDO(
             $this->buildOdbcDsn(),
-            (string) $this->cfg('hfsql_username', 'hfsql.odbc.username'),
-            (string) $this->cfg('hfsql_password', 'hfsql.odbc.password'),
+            (string) $this->cfg('hfsql_username'),
+            (string) $this->cfg('hfsql_password'),
             [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
         );
     }

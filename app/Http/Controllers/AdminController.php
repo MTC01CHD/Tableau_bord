@@ -7,12 +7,19 @@ use App\Models\HfsqlSyncRun;
 use App\Models\HfsqlTable;
 use App\Models\PlatformSetting;
 use App\Services\Hfsql\HfsqlService;
+use App\Support\TenantContext;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 
 class AdminController extends Controller
 {
+    public function __construct(private TenantContext $ctx) {}
+
+    private function tenantId(): int
+    {
+        return $this->ctx->requireId();
+    }
+
     private array $hfsqlKeys = [
         'hfsql_mode', 'hfsql_api_url', 'hfsql_api_key',
         'hfsql_host', 'hfsql_port', 'hfsql_database',
@@ -23,28 +30,8 @@ class AdminController extends Controller
 
     public function hfsqlEdit()
     {
-        $cfg = collect($this->hfsqlKeys)->mapWithKeys(function ($k) {
-            $v = PlatformSetting::get($k);
-            // fallback config si rien en DB
-            if ($v === null || $v === '') {
-                $configKey = str_replace('hfsql_', 'hfsql.', $k);
-                $map = [
-                    'hfsql_mode'     => 'hfsql.mode',
-                    'hfsql_api_url'  => 'hfsql.rest.url',
-                    'hfsql_api_key'  => 'hfsql.rest.api_key',
-                    'hfsql_host'     => 'hfsql.odbc.host',
-                    'hfsql_port'     => 'hfsql.odbc.port',
-                    'hfsql_database' => 'hfsql.odbc.database',
-                    'hfsql_username' => 'hfsql.odbc.username',
-                    'hfsql_password' => 'hfsql.odbc.password',
-                    'hfsql_driver'   => 'hfsql.odbc.driver',
-                    'hfsql_dsn'      => 'hfsql.odbc.dsn',
-                ];
-                $v = config($map[$k] ?? '');
-            }
-            return [$k => $v];
-        });
-
+        // Chaque tenant a sa propre config HFSQL — pas de fallback config/env.
+        $cfg = collect($this->hfsqlKeys)->mapWithKeys(fn ($k) => [$k => PlatformSetting::get($k)]);
         return view('admin.hfsql.edit', ['cfg' => $cfg]);
     }
 
@@ -88,6 +75,7 @@ class AdminController extends Controller
         $local  = HfsqlTable::orderBy('name')->get()->keyBy('name');
 
         $rows = DB::table('hfsql_raw_rows')
+            ->where('tenant_id', $this->tenantId())
             ->select('table_name', DB::raw('COUNT(*) AS n'), DB::raw('MAX(synced_at) AS last_sync'))
             ->groupBy('table_name')
             ->get()
@@ -132,6 +120,7 @@ class AdminController extends Controller
     private function columnsFromLocal(string $table): array
     {
         $sample = DB::table('hfsql_raw_rows')
+            ->where('tenant_id', $this->tenantId())
             ->where('table_name', $table)
             ->limit(1)
             ->value('payload');
@@ -199,6 +188,7 @@ class AdminController extends Controller
         // Tableau enrichi : toutes les tables configurées (admin) + tables avec données.
         $configured = HfsqlTable::orderBy('name')->get()->keyBy('name');
         $rowsAgg = DB::table('hfsql_raw_rows')
+            ->where('tenant_id', $this->tenantId())
             ->select('table_name', DB::raw('COUNT(*) AS n'), DB::raw('MAX(synced_at) AS last_sync'))
             ->groupBy('table_name')->get()->keyBy('table_name');
         $lastRunPerTable = HfsqlSyncRun::query()
@@ -255,7 +245,8 @@ class AdminController extends Controller
         // On dispatche un Job dédié dont le timeout est défini dans la classe
         // (3600s) — comme ça pas besoin de modifier la cmd `queue:work` du
         // worker Laravel Cloud pour avoir un long sync.
-        HfsqlSyncJob::dispatch($resume);
+        // Le tenant_id est transporté explicitement (le worker tourne hors HTTP).
+        HfsqlSyncJob::dispatch($this->tenantId(), $resume);
 
         return back()->with('status', $resume
             ? 'Reprise du sync mise en file. Un worker va l\'exécuter dans quelques secondes.'
@@ -303,6 +294,7 @@ class AdminController extends Controller
         // Liste complète : tables configurées (admin) ∪ tables présentes en base.
         $configured = HfsqlTable::orderBy('name')->get()->keyBy('name');
         $rowsAgg = DB::table('hfsql_raw_rows')
+            ->where('tenant_id', $this->tenantId())
             ->select('table_name', DB::raw('COUNT(*) AS n'), DB::raw('MAX(synced_at) AS last_sync'))
             ->groupBy('table_name')->get()->keyBy('table_name');
         $lastRuns = HfsqlSyncRun::query()
@@ -331,7 +323,8 @@ class AdminController extends Controller
             'is_running'         => $isProcessLive,
             'current_table'      => $running?->table_name,
             'current_started_at' => $running?->started_at?->toIso8601String(),
-            'rows_total'         => (int) DB::table('hfsql_raw_rows')->count(),
+            'rows_total'         => (int) DB::table('hfsql_raw_rows')
+                ->where('tenant_id', $this->tenantId())->count(),
             'tables_count'       => $rowsAgg->count(),
             'has_resumable'      => $hasResumable,
             'tables'             => $tables,
