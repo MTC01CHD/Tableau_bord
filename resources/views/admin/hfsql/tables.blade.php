@@ -34,16 +34,23 @@
                         {{ $remote->count() }} tables disponibles · {{ $local->where('enabled', true)->count() }} sélectionnées
                     </span>
                     <span style="flex:1;"></span>
+                    <button type="button" id="apply-suggestions" style="background:var(--accent);color:#0f172a;font-size:12px;">⚡ Appliquer les suggestions vides</button>
                     <button type="button" id="select-current" style="background:var(--panel2);color:var(--text);font-size:12px;">tout cocher (visible)</button>
                     <button type="button" id="unselect-all" style="background:var(--panel2);color:var(--text);font-size:12px;">tout décocher</button>
                 </div>
+
+                <p class="muted" style="font-size:12px;margin:0 0 10px;">
+                    💡 La colonne « Date suggérée » est devinée à partir des données déjà synchronisées (ou par défaut <code>DateHeureModification</code>).
+                    Vous pouvez l'éditer table par table, ou cliquer <strong>« Appliquer les suggestions vides »</strong> pour remplir tout ce qui est vide d'un coup.
+                </p>
 
                 <table>
                     <thead>
                         <tr>
                             <th style="width:30px;"></th>
                             <th>Table HFSQL</th>
-                            <th>Colonne date pour filtre incrémental</th>
+                            <th>Colonne date (modifiable)</th>
+                            <th>Suggérée</th>
                             <th style="text-align:right;">Lignes locales</th>
                             <th>Dernier sync</th>
                         </tr>
@@ -53,12 +60,23 @@
                             @php
                                 $l = $local[$name] ?? null;
                                 $row = $rows[$name] ?? null;
+                                $sug = $suggestions[$name] ?? 'DateHeureModification';
+                                $current = $l->date_column ?? '';
                             @endphp
-                            <tr class="row" data-name="{{ strtolower($name) }}">
+                            <tr class="row" data-name="{{ strtolower($name) }}" data-suggested="{{ $sug }}">
                                 <td><input type="checkbox" name="tables[]" value="{{ $name }}" {{ $l && $l->enabled ? 'checked' : '' }}></td>
                                 <td><code>{{ $name }}</code></td>
-                                <td><input type="text" name="date_columns[{{ $name }}]" value="{{ $l->date_column ?? '' }}" placeholder="ex: Modification_date"
-                                           style="width:200px;padding:3px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:monospace;"></td>
+                                <td>
+                                    <input type="text" name="date_columns[{{ $name }}]" value="{{ $current }}" placeholder="{{ $sug }}"
+                                           class="date-col-input"
+                                           style="width:200px;padding:3px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:monospace;">
+                                </td>
+                                <td>
+                                    <button type="button" class="apply-one" data-target="date_columns[{{ $name }}]"
+                                            style="background:transparent;border:1px dashed var(--border);color:var(--muted);font-family:monospace;font-size:11px;padding:2px 6px;">
+                                        ↩ {{ $sug }}
+                                    </button>
+                                </td>
                                 <td style="text-align:right;">{{ $row ? number_format($row->n, 0, ',', ' ') : '—' }}</td>
                                 <td class="muted">{{ $row ? \Illuminate\Support\Carbon::parse($row->last_sync)->diffForHumans() : '—' }}</td>
                             </tr>
@@ -85,6 +103,30 @@
         });
         document.getElementById('unselect-all')?.addEventListener('click', () => {
             rows.forEach(r => r.querySelector('input[type=checkbox]').checked = false);
+        });
+
+        // Appliquer la suggestion d'une ligne (bouton ↩ par table)
+        document.querySelectorAll('.apply-one').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const target = btn.dataset.target;
+                const tr = btn.closest('tr');
+                const input = tr.querySelector('.date-col-input');
+                input.value = tr.dataset.suggested;
+            });
+        });
+
+        // Remplir d'un coup toutes les suggestions sur les champs vides
+        document.getElementById('apply-suggestions')?.addEventListener('click', () => {
+            let n = 0;
+            rows.forEach(r => {
+                if (r.style.display === 'none') return;
+                const input = r.querySelector('.date-col-input');
+                if (!input.value.trim()) {
+                    input.value = r.dataset.suggested;
+                    n++;
+                }
+            });
+            alert(`${n} champ(s) rempli(s) avec la suggestion. N'oubliez pas d'« Enregistrer la sélection » en bas.`);
         });
     </script>
 @endsection

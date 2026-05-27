@@ -92,24 +92,83 @@ class AdminController extends Controller
             ->get()
             ->keyBy('table_name');
 
-        return view('admin.hfsql.tables', compact('remote', 'local', 'rows', 'remoteError'));
+        // Suggestion auto de colonne date pour chaque table
+        $suggestions = [];
+        foreach ($remote as $name) {
+            $existing = $local->get($name)?->date_column;
+            $suggestions[$name] = $existing ?: $this->suggestDateColumn($name);
+        }
+
+        return view('admin.hfsql.tables', compact('remote', 'local', 'rows', 'remoteError', 'suggestions'));
+    }
+
+    /**
+     * Propose une colonne date plausible pour une table HFSQL.
+     *  - Si on a déjà des données en base, on inspecte le payload JSONB et on prend
+     *    la première colonne dont le nom ressemble à une date de modification.
+     *  - Sinon on tombe sur DateHeureModification (convention HFSQL/WinDev standard).
+     */
+    private function suggestDateColumn(string $table): string
+    {
+        $defaults = ['DateHeureModification', 'Modification_date', 'DateModif', 'DateModification'];
+
+        // Inspection des données réelles
+        $sample = DB::table('hfsql_raw_rows')
+            ->where('table_name', $table)
+            ->limit(1)
+            ->value('payload');
+
+        if ($sample) {
+            $payload = is_string($sample) ? json_decode($sample, true) : (array) $sample;
+            if (is_array($payload)) {
+                $keys = array_keys($payload);
+                // Priorité 1 : noms attendus (insensible casse)
+                foreach ($defaults as $d) {
+                    foreach ($keys as $k) {
+                        if (strcasecmp($k, $d) === 0) return $k;
+                    }
+                }
+                // Priorité 2 : toute colonne contenant "modif" + "date" / "heure"
+                foreach ($keys as $k) {
+                    if (preg_match('/modif/i', $k) && preg_match('/date|heure/i', $k)) {
+                        return $k;
+                    }
+                }
+                // Priorité 3 : toute colonne avec "date" dans le nom
+                foreach ($keys as $k) {
+                    if (preg_match('/date/i', $k)) return $k;
+                }
+            }
+        }
+
+        // Fallback convention HFSQL standard
+        return $defaults[0];
     }
 
     public function tablesSave(Request $request)
     {
         $selected = (array) $request->input('tables', []);
         $dateCols = (array) $request->input('date_columns', []);
+        $selectedSet = array_flip($selected);
 
-        DB::transaction(function () use ($selected, $dateCols) {
+        DB::transaction(function () use ($selectedSet, $dateCols) {
+            // On désactive toutes les tables actuelles
             HfsqlTable::query()->update(['enabled' => false]);
-            foreach ($selected as $name) {
+
+            // On upsert chaque ligne qui a une colonne date OU qui est cochée
+            // (la date column est conservée même si l'utilisateur décoche temporairement)
+            foreach ($dateCols as $name => $col) {
+                $name = (string) $name;
+                $col = trim((string) $col) ?: null;
+                $enabled = isset($selectedSet[$name]);
+                if (!$enabled && !$col) continue; // rien à garder pour cette ligne
                 HfsqlTable::updateOrCreate(
                     ['name' => $name],
-                    ['enabled' => true, 'date_column' => $dateCols[$name] ?? null]
+                    ['enabled' => $enabled, 'date_column' => $col]
                 );
             }
         });
-        return back()->with('status', count($selected) . ' tables enregistrées pour sync.');
+        return back()->with('status', count($selectedSet) . ' tables enregistrées pour sync.');
     }
 
     // ── Sync history + manual trigger ────────────────────────────────────
