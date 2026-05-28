@@ -122,51 +122,83 @@ class ProjetDepensesService
     {
         $out = [];
 
-        // Prévues : Σ S_Tache.Heures, options inactives exclues
+        // Prévues : Σ S_Tache.Heures
+        // Le filtre options inactives est fait côté PHP pour éviter les
+        // problèmes de cast SQL sur OptionActive (peut contenir des valeurs
+        // non numériques selon les configurations HFSQL).
         if ($this->tableExists('S_Tache')) {
             $rows = DB::select("
                 SELECT
                     NULLIF(payload->>'IDProjet', '')::int AS pid,
-                    SUM(COALESCE(NULLIF(payload->>'Heures', '')::numeric, 0)) AS h
+                    payload->>'Heures' AS h_raw,
+                    payload->>'TypeElement' AS type_elem,
+                    payload->>'OptionActive' AS opt_active
                 FROM hfsql_raw_rows
                 WHERE table_name = 'S_Tache' AND tenant_id = ?
-                  AND NOT (
-                      UPPER(COALESCE(payload->>'TypeElement','')) = 'OPTION'
-                      AND COALESCE(NULLIF(payload->>'OptionActive','')::int, 0) = 0
-                  )
-                GROUP BY pid
+                  AND NULLIF(payload->>'IDProjet', '') IS NOT NULL
             ", [$tenantId]);
             foreach ($rows as $r) {
                 $pid = (int) $r->pid;
-                $out[$pid] = ['prevues' => (float) $r->h, 'depensees' => 0.0];
+                // Exclure option inactive (TypeElement=OPTION ET OptionActive=0)
+                $isOption = strtoupper((string) $r->type_elem) === 'OPTION';
+                $optActiveStr = (string) $r->opt_active;
+                $optInactive = $isOption && ($optActiveStr === '0' || $optActiveStr === '' || strtolower($optActiveStr) === 'non' || strtolower($optActiveStr) === 'false');
+                if ($optInactive) continue;
+                $h = is_numeric($r->h_raw) ? (float) $r->h_raw : (float) str_replace(',', '.', (string) $r->h_raw);
+                $out[$pid] = $out[$pid] ?? ['prevues' => 0.0, 'depensees' => 0.0];
+                $out[$pid]['prevues'] += $h;
             }
         }
 
         // Dépensées : Σ Duree effective des pointages personnel par projet
+        // Calcul intégral en PHP pour éviter tout cast SQL risqué sur 'original'.
         if ($this->tableExists('P_Planning') && $this->tableExists('P_Planning_Pointage')) {
-            $rows = DB::select("
-                WITH pointage_effectif AS (
-                    SELECT DISTINCT ON (NULLIF(payload->>'IDP_Planning','')::int)
-                        NULLIF(payload->>'IDP_Planning','')::int AS idp,
-                        COALESCE(NULLIF(payload->>'Duree','')::numeric, 0) AS duree
-                    FROM hfsql_raw_rows
-                    WHERE table_name = 'P_Planning_Pointage' AND tenant_id = ?
-                      AND NULLIF(payload->>'IDP_Planning','') IS NOT NULL
-                    ORDER BY NULLIF(payload->>'IDP_Planning','')::int,
-                             COALESCE(NULLIF(payload->>'original','')::int, 1) ASC
-                )
+            // 1. Map IDP_Planning -> ID_Origine (= IDProjet)
+            $planningRows = DB::select("
                 SELECT
-                    NULLIF(pl.payload->>'ID_Origine','')::int AS pid,
-                    SUM(COALESCE(pe.duree, 0)) AS h
-                FROM hfsql_raw_rows pl
-                JOIN pointage_effectif pe ON pe.idp = NULLIF(pl.payload->>'IDP_Planning','')::int
-                WHERE pl.table_name = 'P_Planning' AND pl.tenant_id = ?
-                GROUP BY pid
-            ", [$tenantId, $tenantId]);
-            foreach ($rows as $r) {
-                $pid = (int) $r->pid;
-                if (!isset($out[$pid])) $out[$pid] = ['prevues' => 0.0, 'depensees' => 0.0];
-                $out[$pid]['depensees'] = (float) $r->h;
+                    NULLIF(payload->>'IDP_Planning','')::int AS idp,
+                    NULLIF(payload->>'ID_Origine','')::int AS pid
+                FROM hfsql_raw_rows
+                WHERE table_name = 'P_Planning' AND tenant_id = ?
+                  AND NULLIF(payload->>'IDP_Planning','') IS NOT NULL
+            ", [$tenantId]);
+            $pidByIdp = [];
+            foreach ($planningRows as $r) {
+                if ($r->idp) $pidByIdp[(int) $r->idp] = (int) $r->pid;
+            }
+
+            // 2. Pointages bruts : Duree par IDP_Planning, en distinguant modif/original
+            $pointageRows = DB::select("
+                SELECT
+                    NULLIF(payload->>'IDP_Planning','')::int AS idp,
+                    payload->>'Duree' AS duree_raw,
+                    payload->>'original' AS orig_raw
+                FROM hfsql_raw_rows
+                WHERE table_name = 'P_Planning_Pointage' AND tenant_id = ?
+                  AND NULLIF(payload->>'IDP_Planning','') IS NOT NULL
+            ", [$tenantId]);
+
+            // Pour chaque IDP_Planning : si modif (original=0) existe, prendre sa Duree, sinon original
+            $modifParIdp = []; $originalParIdp = [];
+            foreach ($pointageRows as $r) {
+                $idp = (int) $r->idp;
+                $duree = is_numeric($r->duree_raw) ? (float) $r->duree_raw : (float) str_replace(',', '.', (string) $r->duree_raw);
+                $origStr = (string) $r->orig_raw;
+                $isOriginal = $origStr === '1' || strtolower($origStr) === 'true' || strtolower($origStr) === 'vrai';
+                if ($isOriginal) {
+                    $originalParIdp[$idp] = $duree;
+                } else {
+                    $modifParIdp[$idp] = $duree;
+                }
+            }
+
+            // 3. Agréger par projet
+            foreach ($pidByIdp as $idp => $pid) {
+                if (!$pid) continue;
+                $duree = $modifParIdp[$idp] ?? $originalParIdp[$idp] ?? 0;
+                if ($duree <= 0) continue;
+                $out[$pid] = $out[$pid] ?? ['prevues' => 0.0, 'depensees' => 0.0];
+                $out[$pid]['depensees'] += $duree;
             }
         }
 
@@ -215,18 +247,30 @@ class ProjetDepensesService
                     payload->>'DateRDZDebut' AS date
                 ")->get();
 
-            // Charger tous les pointages effectifs (Duree, modif prioritaire)
+            // Charger tous les pointages bruts puis appliquer la règle modif > original en PHP
+            // (évite le cast SQL sur 'original' qui peut planter selon le format HFSQL)
             $rows = DB::select("
-                SELECT DISTINCT ON (NULLIF(payload->>'IDP_Planning', '')::int)
+                SELECT
                     NULLIF(payload->>'IDP_Planning', '')::int AS idp,
-                    COALESCE(NULLIF(payload->>'Duree', '')::numeric, 0) AS duree
+                    payload->>'Duree' AS duree_raw,
+                    payload->>'original' AS orig_raw
                 FROM hfsql_raw_rows
                 WHERE table_name = 'P_Planning_Pointage' AND tenant_id = ?
                   AND NULLIF(payload->>'IDP_Planning', '') IS NOT NULL
-                ORDER BY NULLIF(payload->>'IDP_Planning', '')::int, COALESCE(NULLIF(payload->>'original', '')::int, 1) ASC
             ", [$tenantId]);
+            $modifParIdp = []; $origParIdp = [];
+            foreach ($rows as $r) {
+                $idp = (int) $r->idp;
+                $duree = is_numeric($r->duree_raw) ? (float) $r->duree_raw : (float) str_replace(',', '.', (string) $r->duree_raw);
+                $origStr = (string) $r->orig_raw;
+                $isOriginal = $origStr === '1' || strtolower($origStr) === 'true' || strtolower($origStr) === 'vrai';
+                if ($isOriginal) $origParIdp[$idp] = $duree;
+                else $modifParIdp[$idp] = $duree;
+            }
             $dureesParIdp = [];
-            foreach ($rows as $r) $dureesParIdp[(int) $r->idp] = (float) $r->duree;
+            foreach (array_unique(array_merge(array_keys($modifParIdp), array_keys($origParIdp))) as $idp) {
+                $dureesParIdp[$idp] = $modifParIdp[$idp] ?? $origParIdp[$idp] ?? 0;
+            }
 
             foreach ($plannings as $pl) {
                 $pid = (int) $pl->pid; $ipers = (int) $pl->ipers; $idp = (int) $pl->idp;
@@ -245,13 +289,14 @@ class ProjetDepensesService
             $planningsById = [];
             foreach ($plannings as $pl) $planningsById[(int) $pl->idp] = $pl;
 
+            // Cast Modif/Valeur côté PHP pour tolérer valeurs non numériques
             $rows = DB::select("
                 SELECT
                     NULLIF(payload->>'IDP_Planning', '')::int AS idp,
                     NULLIF(payload->>'ID_Materiel_Base', '')::int AS imat,
-                    COALESCE(NULLIF(payload->>'Modif', '')::int, 0) AS modif,
-                    COALESCE(NULLIF(payload->>'Valeur', '')::numeric, 0) AS valeur,
-                    COALESCE(NULLIF(payload->>'ValeurModif', '')::numeric, 0) AS valeur_modif
+                    payload->>'Modif' AS modif_raw,
+                    payload->>'Valeur' AS val_raw,
+                    payload->>'ValeurModif' AS valmod_raw
                 FROM hfsql_raw_rows
                 WHERE table_name = 'P_Pointage_Materiel' AND tenant_id = ?
             ", [$tenantId]);
@@ -261,7 +306,9 @@ class ProjetDepensesService
                 if (!$pl) continue;
                 $pid = (int) $pl->pid; $imat = (int) $r->imat;
                 if (!$pid || !$imat) continue;
-                $qte = $r->modif === 0 ? (float) $r->valeur : (float) $r->valeur_modif;
+                $isModif = (string) $r->modif_raw === '1' || strtolower((string) $r->modif_raw) === 'true';
+                $valRaw = $isModif ? (string) $r->valmod_raw : (string) $r->val_raw;
+                $qte = is_numeric($valRaw) ? (float) $valRaw : (float) str_replace(',', '.', $valRaw);
                 if ($qte <= 0) continue;
                 $date = HfsqlDate::parse($pl->date);
                 if (!$date) continue;
@@ -277,9 +324,9 @@ class ProjetDepensesService
                 SELECT
                     NULLIF(payload->>'ID_Origine', '')::int AS pid,
                     NULLIF(payload->>'ID_Materiel', '')::int AS imat,
-                    COALESCE(NULLIF(payload->>'Modif', '')::int, 0) AS modif,
-                    COALESCE(NULLIF(payload->>'Duree', '')::numeric, 0) AS duree,
-                    COALESCE(NULLIF(payload->>'DureeModif', '')::numeric, 0) AS duree_modif,
+                    payload->>'Modif' AS modif_raw,
+                    payload->>'Duree' AS dur_raw,
+                    payload->>'DureeModif' AS durmod_raw,
                     payload->>'DatePointage' AS date
                 FROM hfsql_raw_rows
                 WHERE table_name = 'p_pointage_materiel_location' AND tenant_id = ?
@@ -288,7 +335,9 @@ class ProjetDepensesService
             foreach ($rows as $r) {
                 $pid = (int) $r->pid; $imat = (int) $r->imat;
                 if (!$pid || !$imat) continue;
-                $qte = $r->modif === 0 ? (float) $r->duree : (float) $r->duree_modif;
+                $isModif = (string) $r->modif_raw === '1' || strtolower((string) $r->modif_raw) === 'true';
+                $durRaw = $isModif ? (string) $r->durmod_raw : (string) $r->dur_raw;
+                $qte = is_numeric($durRaw) ? (float) $durRaw : (float) str_replace(',', '.', $durRaw);
                 if ($qte <= 0) continue;
                 $date = HfsqlDate::parse($r->date);
                 if (!$date) continue;
