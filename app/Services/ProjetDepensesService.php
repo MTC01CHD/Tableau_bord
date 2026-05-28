@@ -6,6 +6,7 @@ use App\Support\HfsqlDate;
 use App\Support\TenantContext;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -51,6 +52,14 @@ class ProjetDepensesService
         }
 
         $tenantId = $this->ctx->requireId();
+        // Cache 5 min : la sync HFSQL tourne toutes les ~15 min, donc fraîcheur OK.
+        return Cache::remember("realise_par_projet:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doRealiseParProjet($tenantId);
+        });
+    }
+
+    private function doRealiseParProjet(int $tenantId): Collection
+    {
         $rows = DB::select("
             SELECT
                 (sc.payload->>'IDProjet')::int AS pid,
@@ -85,6 +94,14 @@ class ProjetDepensesService
     public function depensesParProjet(): Collection
     {
         $tenantId = $this->ctx->requireId();
+        // Cache 5 min : la sync HFSQL tourne toutes les ~15 min, donc fraîcheur OK.
+        return Cache::remember("depenses_par_projet:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doDepensesParProjet($tenantId);
+        });
+    }
+
+    private function doDepensesParProjet(int $tenantId): Collection
+    {
         $totaux = [];
 
         // 1) Achats : 1 SQL agrégé léger

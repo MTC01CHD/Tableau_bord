@@ -144,6 +144,15 @@ class HfsqlSyncCommand extends Command
         }
 
         PlatformSetting::set('sync_cancel_requested', null);
+
+        // Invalide les caches dashboard pour ce tenant (Réalisé et Dépensé
+        // sont mis en cache 5 min sinon le dashboard met >10s à se charger).
+        $tenantId = app(\App\Support\TenantContext::class)->id();
+        if ($tenantId) {
+            \Illuminate\Support\Facades\Cache::forget("realise_par_projet:{$tenantId}");
+            \Illuminate\Support\Facades\Cache::forget("depenses_par_projet:{$tenantId}");
+        }
+
         return $globalOk;
     }
 
