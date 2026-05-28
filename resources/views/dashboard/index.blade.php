@@ -4,6 +4,73 @@
 
 @section('content')
 
+    {{-- ── Diagnostic Réalisé/Dépensé : VISIBLE si l'un des deux est entièrement vide ── --}}
+    @if (!empty($diagnostic))
+        <div class="card" style="margin-bottom:16px;border:2px solid var(--err);">
+            <h2 style="color:var(--err);margin:0 0 8px;">🚨 Diagnostic : Réalisé et/ou Dépensé sont à 0 partout</h2>
+
+            <p style="font-size:13px;margin:6px 0;">
+                <strong>Σ Réalisé PV portfolio :</strong> {{ number_format($diagnostic['realise_total'], 2, ',', ' ') }} €
+                · <strong>Σ Dépensé portfolio :</strong> {{ number_format($diagnostic['depense_total'], 2, ',', ' ') }} €
+            </p>
+
+            @if (!empty($diagnostic['pistes']))
+                <div style="background:rgba(239,68,68,0.08);padding:10px;border-radius:6px;margin:8px 0;">
+                    <strong style="font-size:13px;">Pistes détectées :</strong>
+                    <ul style="margin:6px 0 0 18px;font-size:13px;">
+                        @foreach ($diagnostic['pistes'] as $p)
+                            <li>{{ $p }}</li>
+                        @endforeach
+                    </ul>
+                </div>
+            @endif
+
+            <details style="margin-top:10px;">
+                <summary style="cursor:pointer;font-size:13px;color:var(--accent);">▶ Détails techniques</summary>
+
+                <h3 style="margin-top:10px;font-size:13px;">S_Com_Suivi</h3>
+                <p style="font-size:12px;margin:4px 0;">
+                    Lignes totales : <strong>{{ number_format($diagnostic['s_com_suivi_count'], 0, ',', ' ') }}</strong>
+                    · Avec IDProjet : <strong>{{ number_format($diagnostic['s_com_suivi_avec_idprojet'] ?? 0, 0, ',', ' ') }}</strong>
+                </p>
+                @if (!empty($diagnostic['s_com_suivi_types']))
+                    <p style="font-size:12px;margin:4px 0;"><strong>Valeurs distinctes de Type :</strong></p>
+                    <table style="font-size:11px;margin:4px 0;">
+                        <thead><tr><th>Valeur</th><th style="text-align:right;">Occurrences</th></tr></thead>
+                        <tbody>
+                            @foreach ($diagnostic['s_com_suivi_types'] as $t)
+                                <tr><td><code>{{ $t['valeur'] !== null ? $t['valeur'] : 'NULL' }}</code></td><td style="text-align:right;">{{ $t['n'] }}</td></tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                @endif
+                @if (!empty($diagnostic['s_com_suivi_keys']))
+                    <p style="font-size:11px;margin:4px 0;">Clés payload : <code>{{ implode(', ', $diagnostic['s_com_suivi_keys']) }}</code></p>
+                @endif
+
+                <h3 style="margin-top:10px;font-size:13px;">S_Com_Suivi_Element</h3>
+                <p style="font-size:12px;margin:4px 0;">Lignes totales : <strong>{{ number_format($diagnostic['s_com_suivi_element_count'], 0, ',', ' ') }}</strong></p>
+                @if (!empty($diagnostic['s_com_suivi_element_keys']))
+                    <p style="font-size:11px;margin:4px 0;">Clés payload : <code>{{ implode(', ', $diagnostic['s_com_suivi_element_keys']) }}</code></p>
+                @endif
+
+                <h3 style="margin-top:10px;font-size:13px;">Tables pointages</h3>
+                <table style="font-size:11px;">
+                    <thead><tr><th>Table</th><th style="text-align:right;">Lignes</th></tr></thead>
+                    <tbody>
+                        @foreach ($diagnostic['tables_pointages'] as $name => $n)
+                            <tr><td><code>{{ $name }}</code></td><td style="text-align:right;color:{{ $n > 0 ? 'var(--ok)' : 'var(--err)' }};">{{ number_format($n, 0, ',', ' ') }}</td></tr>
+                        @endforeach
+                    </tbody>
+                </table>
+            </details>
+
+            <p style="margin-top:10px;font-size:12px;">
+                <a href="{{ route('admin.schema') }}" style="color:var(--accent);">→ Page complète Schema Discovery</a>
+            </p>
+        </div>
+    @endif
+
     {{-- ── Diagnostic état (visible avec ?debug=etat) ──────────────────── --}}
     @if (!empty($debugEtat))
         <div class="card" style="margin-bottom:16px;border:2px dashed var(--warn);">

@@ -61,6 +61,10 @@ class DashboardController extends Controller
         $realisePRParProjet = $realiseAggr->map(fn ($r) => $r['pr']);
         // DÉPENSÉ par projet = Σ achats + personnel + matériel + location
         $depensesParProjet = $this->depenses->depensesParProjet();
+
+        // ── Diagnostic visible : si Réalisé ou Dépensé sont tous à 0, on
+        // remonte d'où ça vient (compte les types, les clés, etc.).
+        $diagnostic = $this->buildDiagnostic($realisePVParProjet, $depensesParProjet);
         // Nombre de tâches par projet (indicateur "y a-t-il quelque chose à voir ?")
         $nbTachesParProjet = $this->rawRows()
             ->where('table_name', 'S_Tache')
@@ -207,8 +211,96 @@ class DashboardController extends Controller
             'depensesParProjet',
             'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
             'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise',
-            'debugEtat'
+            'debugEtat', 'diagnostic'
         ));
+    }
+
+    /**
+     * Construit un mini-diagnostic affiché en haut de la liste UNIQUEMENT
+     * si Réalisé ou Dépensé sont entièrement vides — sinon on cache.
+     * But : voir IMMÉDIATEMENT pourquoi les colonnes restent vides
+     * (table manquante, valeurs Type différentes de 'Vente'/'Achat', etc.).
+     */
+    private function buildDiagnostic($realisePVParProjet, $depensesParProjet): ?array
+    {
+        $sumRealise = (float) $realisePVParProjet->sum();
+        $sumDepense = (float) $depensesParProjet->sum();
+        if ($sumRealise > 0 && $sumDepense > 0) return null; // tout OK, pas de diag
+
+        $tenantId = $this->ctx->requireId();
+        $diag = ['realise_total' => $sumRealise, 'depense_total' => $sumDepense, 'pistes' => []];
+
+        // 1) S_Com_Suivi : combien total, et quelles valeurs distinctes pour Type ?
+        $nbSuivis = (int) DB::table('hfsql_raw_rows')
+            ->where('tenant_id', $tenantId)->where('table_name', 'S_Com_Suivi')->count();
+        $typesDistincts = $nbSuivis > 0 ? DB::select("
+            SELECT payload->>'Type' AS t, COUNT(*) AS n
+            FROM hfsql_raw_rows
+            WHERE tenant_id = ? AND table_name = 'S_Com_Suivi'
+            GROUP BY t ORDER BY n DESC LIMIT 20
+        ", [$tenantId]) : [];
+        $diag['s_com_suivi_count'] = $nbSuivis;
+        $diag['s_com_suivi_types'] = array_map(fn ($r) => ['valeur' => $r->t, 'n' => (int) $r->n], $typesDistincts);
+
+        // 2) S_Com_Suivi : combien ont IDProjet renseigné ?
+        if ($nbSuivis > 0) {
+            $nbAvecIDProjet = (int) DB::table('hfsql_raw_rows')
+                ->where('tenant_id', $tenantId)->where('table_name', 'S_Com_Suivi')
+                ->whereRaw("payload->>'IDProjet' IS NOT NULL AND payload->>'IDProjet' != ''")
+                ->count();
+            $diag['s_com_suivi_avec_idprojet'] = $nbAvecIDProjet;
+
+            // Clés présentes dans le premier payload
+            $firstPayload = DB::table('hfsql_raw_rows')
+                ->where('tenant_id', $tenantId)->where('table_name', 'S_Com_Suivi')
+                ->value('payload');
+            if ($firstPayload) {
+                $arr = is_string($firstPayload) ? json_decode($firstPayload, true) : (array) $firstPayload;
+                $diag['s_com_suivi_keys'] = array_keys((array) $arr);
+            }
+        }
+
+        // 3) S_Com_Suivi_Element : count + clés
+        $nbElems = (int) DB::table('hfsql_raw_rows')
+            ->where('tenant_id', $tenantId)->where('table_name', 'S_Com_Suivi_Element')->count();
+        $diag['s_com_suivi_element_count'] = $nbElems;
+        if ($nbElems > 0) {
+            $firstElem = DB::table('hfsql_raw_rows')
+                ->where('tenant_id', $tenantId)->where('table_name', 'S_Com_Suivi_Element')
+                ->value('payload');
+            if ($firstElem) {
+                $arr = is_string($firstElem) ? json_decode($firstElem, true) : (array) $firstElem;
+                $diag['s_com_suivi_element_keys'] = array_keys((array) $arr);
+            }
+        }
+
+        // 4) Tables pointages
+        $diag['tables_pointages'] = [
+            'P_Planning' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Planning')->count(),
+            'P_Planning_Pointage' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Planning_Pointage')->count(),
+            'P_Pointage_Materiel' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Pointage_Materiel')->count(),
+            'p_pointage_materiel_location' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'p_pointage_materiel_location')->count(),
+            'P_Ressource_Prix' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Ressource_Prix')->count(),
+            'S_Famille_Moyen' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'S_Famille_Moyen')->count(),
+        ];
+
+        // 5) Conclusions automatiques
+        if ($nbSuivis === 0) {
+            $diag['pistes'][] = "⚠️ Table S_Com_Suivi VIDE → relance un sync.";
+        }
+        if ($nbSuivis > 0 && $sumRealise == 0) {
+            $valeurs = array_column($diag['s_com_suivi_types'], 'valeur');
+            $hasVente = false;
+            foreach ($valeurs as $v) if (strcasecmp((string) $v, 'Vente') === 0) $hasVente = true;
+            if (!$hasVente) {
+                $diag['pistes'][] = "⚠️ S_Com_Suivi.Type ne contient PAS la valeur 'Vente'. Valeurs trouvées : " . implode(', ', array_map(fn ($v) => "'$v'", $valeurs)) . ". Mon code cherche 'VENTE' (insensible casse) — adapter si besoin.";
+            }
+        }
+        if ($nbSuivis > 0 && ($diag['s_com_suivi_avec_idprojet'] ?? 0) === 0) {
+            $diag['pistes'][] = "⚠️ Aucun S_Com_Suivi n'a IDProjet renseigné. Clés trouvées dans payload : " . implode(', ', $diag['s_com_suivi_keys'] ?? []) . ".";
+        }
+
+        return $diag;
     }
 
     /** Export CSV de la liste des projets (avec filtres courants appliqués). */
