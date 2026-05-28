@@ -102,6 +102,77 @@ class ProjetDepensesService
         });
     }
 
+    /**
+     * Heures prévues + dépensées agrégées par projet (pour la liste).
+     * - Prévues = Σ S_Tache.Heures (options inactives exclues)
+     * - Dépensées = Σ Duree des pointages effectifs (modif > original)
+     *   du personnel attaché aux plannings du projet
+     *
+     * @return Collection<int, array{prevues:float, depensees:float}>
+     */
+    public function heuresParProjet(): Collection
+    {
+        $tenantId = $this->ctx->requireId();
+        return Cache::remember("heures_par_projet:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doHeuresParProjet($tenantId);
+        });
+    }
+
+    private function doHeuresParProjet(int $tenantId): Collection
+    {
+        $out = [];
+
+        // Prévues : Σ S_Tache.Heures, options inactives exclues
+        if ($this->tableExists('S_Tache')) {
+            $rows = DB::select("
+                SELECT
+                    NULLIF(payload->>'IDProjet', '')::int AS pid,
+                    SUM(COALESCE(NULLIF(payload->>'Heures', '')::numeric, 0)) AS h
+                FROM hfsql_raw_rows
+                WHERE table_name = 'S_Tache' AND tenant_id = ?
+                  AND NOT (
+                      UPPER(COALESCE(payload->>'TypeElement','')) = 'OPTION'
+                      AND COALESCE(NULLIF(payload->>'OptionActive','')::int, 0) = 0
+                  )
+                GROUP BY pid
+            ", [$tenantId]);
+            foreach ($rows as $r) {
+                $pid = (int) $r->pid;
+                $out[$pid] = ['prevues' => (float) $r->h, 'depensees' => 0.0];
+            }
+        }
+
+        // Dépensées : Σ Duree effective des pointages personnel par projet
+        if ($this->tableExists('P_Planning') && $this->tableExists('P_Planning_Pointage')) {
+            $rows = DB::select("
+                WITH pointage_effectif AS (
+                    SELECT DISTINCT ON (NULLIF(payload->>'IDP_Planning','')::int)
+                        NULLIF(payload->>'IDP_Planning','')::int AS idp,
+                        COALESCE(NULLIF(payload->>'Duree','')::numeric, 0) AS duree
+                    FROM hfsql_raw_rows
+                    WHERE table_name = 'P_Planning_Pointage' AND tenant_id = ?
+                      AND NULLIF(payload->>'IDP_Planning','') IS NOT NULL
+                    ORDER BY NULLIF(payload->>'IDP_Planning','')::int,
+                             COALESCE(NULLIF(payload->>'original','')::int, 1) ASC
+                )
+                SELECT
+                    NULLIF(pl.payload->>'ID_Origine','')::int AS pid,
+                    SUM(COALESCE(pe.duree, 0)) AS h
+                FROM hfsql_raw_rows pl
+                JOIN pointage_effectif pe ON pe.idp = NULLIF(pl.payload->>'IDP_Planning','')::int
+                WHERE pl.table_name = 'P_Planning' AND pl.tenant_id = ?
+                GROUP BY pid
+            ", [$tenantId, $tenantId]);
+            foreach ($rows as $r) {
+                $pid = (int) $r->pid;
+                if (!isset($out[$pid])) $out[$pid] = ['prevues' => 0.0, 'depensees' => 0.0];
+                $out[$pid]['depensees'] = (float) $r->h;
+            }
+        }
+
+        return collect($out);
+    }
+
     private function doDepensesParProjet(int $tenantId): Collection
     {
         $totaux = [];
@@ -241,45 +312,52 @@ class ProjetDepensesService
             return ['pv' => 0.0, 'pr' => 0.0, 'lignes' => collect()];
         }
 
+        // Charger les SUIVIS de vente du projet sur la période
         $suivis = $this->rows('S_Com_Suivi')
             ->whereRaw("UPPER(COALESCE(payload->>'TYPE', payload->>'Type')) = 'VENTE'")
-            ->whereRaw("(payload->>'IDProjet')::int = ?", [$idProjet])
+            ->whereRaw("NULLIF(payload->>'IDProjet', '')::int = ?", [$idProjet])
             ->get()
             ->map(fn ($r) => $this->jsonRow($r->payload))
             ->filter(fn ($s) => $this->dateInRange($s['DateDeDebut'] ?? null, $from, $to))
             ->keyBy(fn ($s) => (int) ($s['IDS_Com_Suivi'] ?? 0));
 
         if ($suivis->isEmpty()) {
-            return ['pv' => 0.0, 'pr' => 0.0, 'lignes' => collect()];
+            return ['pv' => 0.0, 'pr' => 0.0, 'suivis' => collect()];
         }
 
+        // Récupérer tous les éléments des suivis pour calculer le total par suivi
         $idsSuivi = $suivis->keys()->all();
-        $elements = $this->rows('S_Com_Suivi_Element')
-            ->whereRaw("(payload->>'IDS_Com_Suivi')::int = ANY(?)", [$this->intArray($idsSuivi)])
+        $elementsParSuivi = $this->rows('S_Com_Suivi_Element')
+            ->whereRaw("NULLIF(payload->>'IDS_Com_Suivi', '')::int = ANY(?)", [$this->intArray($idsSuivi)])
             ->get()
-            ->map(fn ($r) => $this->jsonRow($r->payload));
+            ->map(fn ($r) => $this->jsonRow($r->payload))
+            ->groupBy(fn ($e) => (int) ($e['IDS_Com_Suivi'] ?? 0));
 
+        // Une ligne par SUIVI (pas par élément), avec son total agrégé
         $pv = 0.0;
         $pr = 0.0;
-        $lignes = $elements->map(function ($e) use ($suivis, &$pv, &$pr) {
-            $suivi = $suivis[(int) ($e['IDS_Com_Suivi'] ?? 0)] ?? null;
-            if (!$suivi) return null;
-            $qte  = (float) ($e['Quantite'] ?? 0);
-            $totV = (float) ($e['Somme_V'] ?? 0);
-            $totR = (float) ($e['Somme_R'] ?? 0);
-            $pv += $totV;
-            $pr += $totR;
+        $listeSuivis = $suivis->map(function ($suivi, $idSuivi) use ($elementsParSuivi, &$pv, &$pr) {
+            $elems  = $elementsParSuivi->get($idSuivi, collect());
+            $totPV  = (float) $elems->sum(fn ($e) => (float) ($e['Somme_V'] ?? 0));
+            $totPR  = (float) $elems->sum(fn ($e) => (float) ($e['Somme_R'] ?? 0));
+            $pv += $totPV;
+            $pr += $totPR;
             return [
-                'date_debut'  => HfsqlDate::parse($suivi['DateDeDebut'] ?? null),
-                'description' => (string) ($e['Designation'] ?? ''),
-                'constante'   => $e['ConstanteFamille'] ?? $suivi['ConstanteFamille'] ?? null,
-                'qte'         => $qte,
-                'total_pv'    => round($totV, 2),
-                'total_pr'    => round($totR, 2),
+                'id'                => $idSuivi,
+                'numero'            => $suivi['numero'] ?? $suivi['Numero'] ?? '',
+                'designation'       => (string) ($suivi['Designation'] ?? ''),
+                'description'       => (string) ($suivi['Description'] ?? ''),
+                'date_debut'        => HfsqlDate::parse($suivi['DateDeDebut'] ?? null),
+                'date_fin'          => HfsqlDate::parse($suivi['DateDeFin'] ?? null),
+                'constante_famille' => $suivi['ConstanteFamille'] ?? null,
+                'date_document'     => HfsqlDate::parse($suivi['Date_Document'] ?? null),
+                'nb_elements'       => $elems->count(),
+                'total_pv'          => round($totPV, 2),
+                'total_pr'          => round($totPR, 2),
             ];
-        })->filter()->values();
+        })->sortByDesc(fn ($s) => $s['date_debut']?->timestamp ?? 0)->values();
 
-        return ['pv' => round($pv, 2), 'pr' => round($pr, 2), 'lignes' => $lignes];
+        return ['pv' => round($pv, 2), 'pr' => round($pr, 2), 'suivis' => $listeSuivis];
     }
 
     /**

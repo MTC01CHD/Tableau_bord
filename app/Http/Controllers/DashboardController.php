@@ -61,6 +61,8 @@ class DashboardController extends Controller
         $realisePRParProjet = $realiseAggr->map(fn ($r) => $r['pr']);
         // DÉPENSÉ par projet = Σ achats + personnel + matériel + location
         $depensesParProjet = $this->depenses->depensesParProjet();
+        // HEURES par projet = prévues (S_Tache.Heures) + dépensées (Σ Duree pointages)
+        $heuresParProjet = $this->depenses->heuresParProjet();
 
         // ── Diagnostic visible : si Réalisé ou Dépensé sont tous à 0, on
         // remonte d'où ça vient (compte les types, les clés, etc.).
@@ -208,7 +210,7 @@ class DashboardController extends Controller
             'derapagesOnly', 'sort',
             'prevuPVParProjet', 'prevuPRParProjet',
             'realisePVParProjet', 'realisePRParProjet',
-            'depensesParProjet',
+            'depensesParProjet', 'heuresParProjet',
             'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
             'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise',
             'debugEtat', 'diagnostic'
@@ -274,15 +276,21 @@ class DashboardController extends Controller
             }
         }
 
-        // 4) Tables pointages
-        $diag['tables_pointages'] = [
-            'P_Planning' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Planning')->count(),
-            'P_Planning_Pointage' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Planning_Pointage')->count(),
-            'P_Pointage_Materiel' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Pointage_Materiel')->count(),
-            'p_pointage_materiel_location' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'p_pointage_materiel_location')->count(),
-            'P_Ressource_Prix' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'P_Ressource_Prix')->count(),
-            'S_Famille_Moyen' => (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', 'S_Famille_Moyen')->count(),
-        ];
+        // 4) Tables pointages : count + clés du 1er payload pour chaque
+        $pointageTables = ['P_Planning', 'P_Planning_Pointage', 'P_Pointage_Materiel', 'p_pointage_materiel_location', 'P_Ressource_Prix', 'S_Famille_Moyen'];
+        $diag['tables_pointages'] = [];
+        foreach ($pointageTables as $tbl) {
+            $count = (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', $tbl)->count();
+            $keys = [];
+            if ($count > 0) {
+                $first = DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', $tbl)->value('payload');
+                if ($first) {
+                    $arr = is_string($first) ? json_decode($first, true) : (array) $first;
+                    $keys = array_keys((array) $arr);
+                }
+            }
+            $diag['tables_pointages'][$tbl] = ['count' => $count, 'keys' => $keys];
+        }
 
         // 5) Conclusions automatiques
         if ($nbSuivis === 0) {

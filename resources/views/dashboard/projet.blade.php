@@ -170,41 +170,45 @@
         </div>
     </div>
 
-    {{-- ── Détail 1 : Suivis de vente (= lignes Réalisé) ─────────────── --}}
+    {{-- ── Détail 1 : Liste des SUIVIS de vente (1 ligne = 1 suivi commercial) ── --}}
     <div class="card" style="margin-bottom:16px;">
-        <h2 style="border-bottom:2px solid var(--ok);padding-bottom:6px;">🧾 Détail Réalisé — lignes des suivis de vente ({{ $realise['lignes']->count() }})</h2>
-        @if ($realise['lignes']->isEmpty())
-            <p class="muted">Aucun élément de suivi de vente sur cette période.</p>
+        <h2 style="border-bottom:2px solid var(--ok);padding-bottom:6px;">🧾 Suivis de vente — {{ $realise['suivis']->count() }} suivi(s)</h2>
+        @if ($realise['suivis']->isEmpty())
+            <p class="muted">Aucun suivi de vente (S_Com_Suivi Type=Vente) sur cette période.</p>
         @else
             <table>
                 <thead>
                     <tr>
-                        <th>Date</th>
+                        <th>N°</th>
+                        <th>Date début</th>
+                        <th>Date fin</th>
                         <th>Famille</th>
-                        <th>Description</th>
-                        <th style="text-align:right;">Qté</th>
-                        <th style="text-align:right;">Somme PV</th>
-                        <th style="text-align:right;">Somme PR</th>
+                        <th>Désignation</th>
+                        <th style="text-align:right;">Nb lignes</th>
+                        <th style="text-align:right;">Σ PV</th>
+                        <th style="text-align:right;">Σ PR</th>
                         <th style="text-align:right;">Marge</th>
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach ($realise['lignes']->sortBy(fn ($l) => $l['date_debut']?->timestamp ?? 0) as $l)
-                        @php $mLigne = $l['total_pv'] - $l['total_pr']; @endphp
+                    @foreach ($realise['suivis'] as $s)
+                        @php $mSuivi = $s['total_pv'] - $s['total_pr']; @endphp
                         <tr>
-                            <td class="muted">{{ $l['date_debut']?->format('d/m/Y') ?? '—' }}</td>
-                            <td class="muted" style="font-size:11px;">{{ $l['constante'] ?? '—' }}</td>
-                            <td>{{ \Illuminate\Support\Str::limit($l['description'], 70) }}</td>
-                            <td style="text-align:right;">{{ number_format($l['qte'], 2, ',', ' ') }}</td>
-                            <td style="text-align:right;">{{ number_format($l['total_pv'], 2, ',', ' ') }} €</td>
-                            <td style="text-align:right;">{{ number_format($l['total_pr'], 2, ',', ' ') }} €</td>
-                            <td style="text-align:right;color:{{ $colorize($mLigne) }};">{{ number_format($mLigne, 2, ',', ' ') }} €</td>
+                            <td><code>{{ $s['numero'] ?: '#' . $s['id'] }}</code></td>
+                            <td class="muted">{{ $s['date_debut']?->format('d/m/Y') ?? '—' }}</td>
+                            <td class="muted">{{ $s['date_fin']?->format('d/m/Y') ?? '—' }}</td>
+                            <td class="muted" style="font-size:11px;">{{ $s['constante_famille'] ?? '—' }}</td>
+                            <td>{{ \Illuminate\Support\Str::limit($s['designation'] ?: $s['description'], 60) }}</td>
+                            <td style="text-align:right;" class="muted">{{ $s['nb_elements'] }}</td>
+                            <td style="text-align:right;font-weight:600;">{{ number_format($s['total_pv'], 2, ',', ' ') }} €</td>
+                            <td style="text-align:right;">{{ number_format($s['total_pr'], 2, ',', ' ') }} €</td>
+                            <td style="text-align:right;color:{{ $colorize($mSuivi) }};font-weight:600;">{{ number_format($mSuivi, 2, ',', ' ') }} €</td>
                         </tr>
                     @endforeach
                 </tbody>
                 <tfoot>
                     <tr style="border-top:2px solid var(--border);">
-                        <th colspan="4" style="text-align:right;">TOTAL</th>
+                        <th colspan="6" style="text-align:right;">TOTAL</th>
                         <th style="text-align:right;">{{ number_format($realisePV, 2, ',', ' ') }} €</th>
                         <th style="text-align:right;">{{ number_format($realisePR, 2, ',', ' ') }} €</th>
                         <th style="text-align:right;color:{{ $colorize($margeRealisee) }};">{{ number_format($margeRealisee, 2, ',', ' ') }} €</th>

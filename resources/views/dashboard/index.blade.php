@@ -54,15 +54,16 @@
                     <p style="font-size:11px;margin:4px 0;">Clés payload : <code>{{ implode(', ', $diagnostic['s_com_suivi_element_keys']) }}</code></p>
                 @endif
 
-                <h3 style="margin-top:10px;font-size:13px;">Tables pointages</h3>
-                <table style="font-size:11px;">
-                    <thead><tr><th>Table</th><th style="text-align:right;">Lignes</th></tr></thead>
-                    <tbody>
-                        @foreach ($diagnostic['tables_pointages'] as $name => $n)
-                            <tr><td><code>{{ $name }}</code></td><td style="text-align:right;color:{{ $n > 0 ? 'var(--ok)' : 'var(--err)' }};">{{ number_format($n, 0, ',', ' ') }}</td></tr>
-                        @endforeach
-                    </tbody>
-                </table>
+                <h3 style="margin-top:10px;font-size:13px;">Tables pointages — counts + clés payload</h3>
+                @foreach ($diagnostic['tables_pointages'] as $name => $info)
+                    <div style="margin:6px 0;padding:6px 8px;background:var(--panel2);border-radius:4px;">
+                        <strong><code>{{ $name }}</code></strong> :
+                        <span style="color:{{ $info['count'] > 0 ? 'var(--ok)' : 'var(--err)' }};">{{ number_format($info['count'], 0, ',', ' ') }} lignes</span>
+                        @if (!empty($info['keys']))
+                            <br><span style="font-size:10px;color:var(--muted);">Clés : <code>{{ implode(', ', $info['keys']) }}</code></span>
+                        @endif
+                    </div>
+                @endforeach
             </details>
 
             <p style="margin-top:10px;font-size:12px;">
@@ -258,6 +259,8 @@
                         <th style="text-align:right;" title="Réalisé en prix de vente — Σ S_Com_Suivi_Element (Type=Vente)">Réalisé PV</th>
                         <th style="text-align:right;" title="Dépensé total — Achats + Personnel + Matériel + Location">Dépensé</th>
                         <th style="text-align:right;" title="Marge réelle = Réalisé PV − Dépensé">Marge réelle</th>
+                        <th style="text-align:right;" title="Heures prévues — Σ S_Tache.Heures">H prév.</th>
+                        <th style="text-align:right;" title="Heures dépensées — Σ Duree pointages effectifs (modif > original)">H dép.</th>
                         <th title="% avancement = Réalisé PV / Prévu PV">Avanc.</th>
                         <th style="text-align:center;" title="Tâches · Plannings disponibles">Données</th>
                         <th>Début</th>
@@ -280,6 +283,8 @@
                             $isMargeNeg = ($rPV > 0 || $dep > 0) && $margeReelle < 0;
                             $nbT = (int) ($nbTachesParProjet[$pid]    ?? 0);
                             $nbP = (int) ($nbPlanningsParProjet[$pid] ?? 0);
+                            $hPrev = (float) ($heuresParProjet[$pid]['prevues']   ?? 0);
+                            $hDep  = (float) ($heuresParProjet[$pid]['depensees'] ?? 0);
                             $etatLib = $libellesEtats[$p->etat] ?? $p->etat;
                         @endphp
                         <tr style="{{ $isMargeNeg ? 'background: rgba(239,68,68,0.06);' : '' }}">
@@ -294,6 +299,8 @@
                             <td style="text-align:right;{{ ($rPV > 0 || $dep > 0) ? 'color:' . ($margeReelle >= 0 ? 'var(--ok)' : 'var(--err)') . ';font-weight:600;' : '' }}">
                                 {{ ($rPV > 0 || $dep > 0) ? number_format($margeReelle, 0, ',', ' ') . ' €' : '—' }}
                             </td>
+                            <td style="text-align:right;font-size:12px;">{{ $hPrev > 0 ? number_format($hPrev, 1, ',', ' ') . ' h' : '—' }}</td>
+                            <td style="text-align:right;font-size:12px;color:{{ $hDep > $hPrev && $hPrev > 0 ? 'var(--err)' : 'inherit' }};">{{ $hDep > 0 ? number_format($hDep, 1, ',', ' ') . ' h' : '—' }}</td>
                             <td style="min-width:120px;">
                                 @if ($pPV > 0)
                                     <div style="display:flex;align-items:center;gap:6px;font-size:11px;">
@@ -325,7 +332,7 @@
                         <td style="text-align:right;font-weight:600;color:{{ $pageMargeReelle >= 0 ? 'var(--ok)' : 'var(--err)' }};">
                             {{ number_format($pageMargeReelle, 0, ',', ' ') }} €
                         </td>
-                        <td colspan="4" class="muted" style="font-size:11px;">
+                        <td colspan="6" class="muted" style="font-size:11px;">
                             ({{ $projets->total() }} au total)
                         </td>
                     </tr>
