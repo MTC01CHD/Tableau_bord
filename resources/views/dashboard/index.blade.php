@@ -189,8 +189,8 @@
                         <th>N°</th><th>Nom</th><th>État</th>
                         <th style="text-align:right;" title="Prévu en prix de vente — Σ S_Tache.Somme_V">Prévu PV</th>
                         <th style="text-align:right;" title="Réalisé en prix de vente — Σ S_Com_Suivi_Element (Type=Vente)">Réalisé PV</th>
-                        <th style="text-align:right;" title="Réalisé en prix de revient — même source × PU_R">Réalisé PR</th>
-                        <th style="text-align:right;" title="Marge réalisée = Réalisé PV − Réalisé PR">Marge</th>
+                        <th style="text-align:right;" title="Dépensé total — Achats + Personnel + Matériel + Location">Dépensé</th>
+                        <th style="text-align:right;" title="Marge réelle = Réalisé PV − Dépensé">Marge réelle</th>
                         <th title="% avancement = Réalisé PV / Prévu PV">Avanc.</th>
                         <th style="text-align:center;" title="Tâches · Plannings disponibles">Données</th>
                         <th>Début</th>
@@ -198,19 +198,19 @@
                     </tr>
                 </thead>
                 @php
-                    $pagePrevuPV = 0; $pageRealisePV = 0; $pageRealisePR = 0;
+                    $pagePrevuPV = 0; $pageRealisePV = 0; $pageDepense = 0;
                 @endphp
                 <tbody>
                     @foreach ($projets as $p)
                         @php
                             $pid = $p->id_projet;
-                            $pPV = (float) ($prevuPVParProjet[$pid]    ?? 0);
-                            $rPV = (float) ($realisePVParProjet[$pid]  ?? 0);
-                            $rPR = (float) ($realisePRParProjet[$pid]  ?? 0);
-                            $marge = $rPV - $rPR;
-                            $pagePrevuPV += $pPV; $pageRealisePV += $rPV; $pageRealisePR += $rPR;
+                            $pPV  = (float) ($prevuPVParProjet[$pid]    ?? 0);
+                            $rPV  = (float) ($realisePVParProjet[$pid]  ?? 0);
+                            $dep  = (float) ($depensesParProjet[$pid]   ?? 0);
+                            $margeReelle = $rPV - $dep;
+                            $pagePrevuPV += $pPV; $pageRealisePV += $rPV; $pageDepense += $dep;
                             $pctAvanc = $pPV > 0 ? min(round(($rPV / $pPV) * 100, 1), 200) : 0;
-                            $isMargeNeg = ($rPV > 0 || $rPR > 0) && $marge < 0;
+                            $isMargeNeg = ($rPV > 0 || $dep > 0) && $margeReelle < 0;
                             $nbT = (int) ($nbTachesParProjet[$pid]    ?? 0);
                             $nbP = (int) ($nbPlanningsParProjet[$pid] ?? 0);
                             $etatLib = $libellesEtats[$p->etat] ?? $p->etat;
@@ -223,9 +223,9 @@
                             </td>
                             <td style="text-align:right;">{{ $pPV > 0 ? number_format($pPV, 0, ',', ' ') . ' €' : '—' }}</td>
                             <td style="text-align:right;">{{ $rPV > 0 ? number_format($rPV, 0, ',', ' ') . ' €' : '—' }}</td>
-                            <td style="text-align:right;">{{ $rPR > 0 ? number_format($rPR, 0, ',', ' ') . ' €' : '—' }}</td>
-                            <td style="text-align:right;{{ $marge != 0 ? 'color:' . ($marge >= 0 ? 'var(--ok)' : 'var(--err)') . ';font-weight:600;' : '' }}">
-                                {{ ($rPV > 0 || $rPR > 0) ? number_format($marge, 0, ',', ' ') . ' €' : '—' }}
+                            <td style="text-align:right;color:{{ $dep > 0 ? 'var(--err)' : 'var(--muted)' }};">{{ $dep > 0 ? number_format($dep, 0, ',', ' ') . ' €' : '—' }}</td>
+                            <td style="text-align:right;{{ ($rPV > 0 || $dep > 0) ? 'color:' . ($margeReelle >= 0 ? 'var(--ok)' : 'var(--err)') . ';font-weight:600;' : '' }}">
+                                {{ ($rPV > 0 || $dep > 0) ? number_format($margeReelle, 0, ',', ' ') . ' €' : '—' }}
                             </td>
                             <td style="min-width:120px;">
                                 @if ($pPV > 0)
@@ -248,18 +248,18 @@
                         </tr>
                     @endforeach
                 </tbody>
-                @php $pageMarge = $pageRealisePV - $pageRealisePR; @endphp
+                @php $pageMargeReelle = $pageRealisePV - $pageDepense; @endphp
                 <tfoot>
                     <tr style="border-top:2px solid var(--accent);background:var(--panel2);">
                         <td colspan="3" style="font-weight:600;">TOTAL page ({{ $projets->count() }} projets)</td>
                         <td style="text-align:right;font-weight:600;">{{ number_format($pagePrevuPV, 0, ',', ' ') }} €</td>
                         <td style="text-align:right;font-weight:600;">{{ number_format($pageRealisePV, 0, ',', ' ') }} €</td>
-                        <td style="text-align:right;font-weight:600;">{{ number_format($pageRealisePR, 0, ',', ' ') }} €</td>
-                        <td style="text-align:right;font-weight:600;color:{{ $pageMarge >= 0 ? 'var(--ok)' : 'var(--err)' }};">
-                            {{ number_format($pageMarge, 0, ',', ' ') }} €
+                        <td style="text-align:right;font-weight:600;color:var(--err);">{{ number_format($pageDepense, 0, ',', ' ') }} €</td>
+                        <td style="text-align:right;font-weight:600;color:{{ $pageMargeReelle >= 0 ? 'var(--ok)' : 'var(--err)' }};">
+                            {{ number_format($pageMargeReelle, 0, ',', ' ') }} €
                         </td>
                         <td colspan="4" class="muted" style="font-size:11px;">
-                            ({{ $projets->total() }} au total · totaux globaux dans les KPI en haut)
+                            ({{ $projets->total() }} au total)
                         </td>
                     </tr>
                 </tfoot>

@@ -367,4 +367,80 @@ class AdminController extends Controller
             'queue_diag'         => $queueDiag,
         ]);
     }
+
+    /**
+     * Schema discovery : pour chaque table HFSQL synchronisée, montre
+     * la liste des colonnes (clés JSONB) avec un échantillon de valeurs,
+     * et pour les colonnes "type" les valeurs distinctes avec leur fréquence.
+     * Permet d'identifier rapidement les vrais noms et valeurs avant d'écrire
+     * une requête de calcul.
+     */
+    public function schemaDiscovery(Request $request)
+    {
+        $tenantId = $this->tenantId();
+        $focus = $request->string('table')->toString() ?: null;
+
+        // Liste des tables présentes pour ce tenant
+        $tableNames = DB::table('hfsql_raw_rows')
+            ->where('tenant_id', $tenantId)
+            ->select('table_name', DB::raw('COUNT(*) AS n'))
+            ->groupBy('table_name')
+            ->orderBy('table_name')
+            ->get();
+
+        $report = [];
+        foreach ($tableNames as $t) {
+            $name = $t->table_name;
+            // Si une table est focused, ne reporter que celle-là
+            if ($focus && $name !== $focus) continue;
+
+            // 3 payloads échantillons
+            $samples = DB::table('hfsql_raw_rows')
+                ->where('tenant_id', $tenantId)
+                ->where('table_name', $name)
+                ->limit(3)
+                ->pluck('payload')
+                ->map(fn ($p) => is_string($p) ? json_decode($p, true) : (array) $p)
+                ->toArray();
+
+            $allKeys = [];
+            foreach ($samples as $s) {
+                foreach (array_keys((array) $s) as $k) {
+                    $allKeys[$k] = ($allKeys[$k] ?? 0) + 1;
+                }
+            }
+            ksort($allKeys);
+
+            // Valeurs distinctes pour colonnes "type" / "etat" / "categorie"
+            $distinctsForKeys = [];
+            foreach (['Type', 'type', 'Etat_Code', 'EtatCode', 'etat_code', 'Etat', 'IDEtat',
+                      'TypeRessource', 'TypeElement', 'ConstanteFamille', 'ParDefaut',
+                      'Materiel', 'ActiveDefaut', 'original', 'Modif'] as $candidateKey) {
+                if (!isset($allKeys[$candidateKey])) continue;
+                $rows = DB::select("
+                    SELECT payload->>? AS v, COUNT(*) AS n
+                    FROM hfsql_raw_rows
+                    WHERE tenant_id = ? AND table_name = ?
+                    GROUP BY v
+                    ORDER BY n DESC
+                    LIMIT 20
+                ", [$candidateKey, $tenantId, $name]);
+                $distinctsForKeys[$candidateKey] = array_map(fn ($r) => ['valeur' => $r->v, 'n' => (int) $r->n], $rows);
+            }
+
+            $report[] = [
+                'table'          => $name,
+                'nb_lignes'      => (int) $t->n,
+                'keys_with_freq' => $allKeys,
+                'samples'        => $samples,
+                'distincts'      => $distinctsForKeys,
+            ];
+        }
+
+        return view('admin.schema-discovery', [
+            'report' => $report,
+            'focus'  => $focus,
+            'tableNames' => $tableNames,
+        ]);
+    }
 }

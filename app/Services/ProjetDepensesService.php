@@ -40,6 +40,7 @@ class ProjetDepensesService
     /**
      * Réalisé agrégé par projet (pour la liste du dashboard).
      * Une seule requête SQL pour tous les projets.
+     * Type comparé en case-insensitive pour tolérer Vente/VENTE/vente.
      *
      * @return Collection<int, array{pv:float, pr:float}>
      */
@@ -62,13 +63,157 @@ class ProjetDepensesService
              AND (sce.payload->>'IDS_Com_Suivi')::int = (sc.payload->>'IDS_Com_Suivi')::int
             WHERE sc.table_name = 'S_Com_Suivi'
               AND sc.tenant_id = ?
-              AND sc.payload->>'Type' = 'Vente'
+              AND UPPER(sc.payload->>'Type') = 'VENTE'
             GROUP BY pid
         ", [$tenantId]);
 
         return collect($rows)->mapWithKeys(fn ($r) => [
             (int) $r->pid => ['pv' => (float) $r->pv, 'pr' => (float) $r->pr],
         ]);
+    }
+
+    /**
+     * Dépensé agrégé par projet (pour la liste).
+     * Somme les 3 sources possibles : achats (S_Com_Suivi.Type='Achat'),
+     * personnel (P_Planning × P_Planning_Pointage × P_Ressource_Prix),
+     * matériel (P_Pointage_Materiel + p_pointage_materiel_location × P_Ressource_Prix).
+     *
+     * @return Collection<int, float> idProjet => total dépensé
+     */
+    public function depensesParProjet(): Collection
+    {
+        $tenantId = $this->ctx->requireId();
+        $totaux = collect();
+
+        // 1) Achats : Σ Somme_V des éléments dont le suivi est Type='Achat'
+        if ($this->tableExists('S_Com_Suivi') && $this->tableExists('S_Com_Suivi_Element')) {
+            $rows = DB::select("
+                SELECT
+                    (sc.payload->>'IDProjet')::int AS pid,
+                    SUM(COALESCE((sce.payload->>'Somme_V')::numeric, 0)) AS s
+                FROM hfsql_raw_rows sc
+                JOIN hfsql_raw_rows sce
+                  ON sce.table_name = 'S_Com_Suivi_Element'
+                 AND sce.tenant_id = sc.tenant_id
+                 AND (sce.payload->>'IDS_Com_Suivi')::int = (sc.payload->>'IDS_Com_Suivi')::int
+                WHERE sc.table_name = 'S_Com_Suivi'
+                  AND sc.tenant_id = ?
+                  AND UPPER(sc.payload->>'Type') = 'ACHAT'
+                GROUP BY pid
+            ", [$tenantId]);
+            foreach ($rows as $r) {
+                $pid = (int) $r->pid;
+                $totaux[$pid] = ($totaux[$pid] ?? 0) + (float) $r->s;
+            }
+        }
+
+        // 2) Personnel : Σ Duree (modif prioritaire sur original) × tarif Personnel
+        if ($this->tableExists('P_Planning') && $this->tableExists('P_Planning_Pointage') && $this->tableExists('P_Ressource_Prix')) {
+            $rows = DB::select("
+                WITH pointage_effectif AS (
+                    -- Pour chaque IDP_Planning, on prend Duree de la modif (original=0) si elle existe, sinon original=1
+                    SELECT DISTINCT ON ((payload->>'IDP_Planning')::int)
+                        (payload->>'IDP_Planning')::int AS idp,
+                        (payload->>'Duree')::numeric AS duree
+                    FROM hfsql_raw_rows
+                    WHERE table_name = 'P_Planning_Pointage'
+                      AND tenant_id = ?
+                    ORDER BY (payload->>'IDP_Planning')::int, (payload->>'original')::int ASC
+                )
+                SELECT
+                    (pl.payload->>'ID_Origine')::int AS pid,
+                    SUM(COALESCE(pe.duree, 0) * COALESCE(pr.prix, 0)) AS s
+                FROM hfsql_raw_rows pl
+                JOIN pointage_effectif pe ON pe.idp = (pl.payload->>'IDP_Planning')::int
+                LEFT JOIN LATERAL (
+                    SELECT (payload->>'PrixImputation')::numeric AS prix
+                    FROM hfsql_raw_rows
+                    WHERE table_name = 'P_Ressource_Prix'
+                      AND tenant_id = pl.tenant_id
+                      AND payload->>'TypeRessource' = 'Personnel'
+                      AND (payload->>'IDRessource')::int = (pl.payload->>'ID_Personnel_Base')::int
+                    ORDER BY (payload->>'APartirDu') DESC
+                    LIMIT 1
+                ) pr ON true
+                WHERE pl.table_name = 'P_Planning'
+                  AND pl.tenant_id = ?
+                GROUP BY pid
+            ", [$tenantId, $tenantId]);
+            foreach ($rows as $r) {
+                $pid = (int) $r->pid;
+                $totaux[$pid] = ($totaux[$pid] ?? 0) + (float) $r->s;
+            }
+        }
+
+        // 3) Matériel (P_Pointage_Materiel) : Valeur ou ValeurModif × tarif Materiel
+        if ($this->tableExists('P_Planning') && $this->tableExists('P_Pointage_Materiel') && $this->tableExists('P_Ressource_Prix')) {
+            $rows = DB::select("
+                SELECT
+                    (pl.payload->>'ID_Origine')::int AS pid,
+                    SUM(
+                        CASE WHEN COALESCE((pm.payload->>'Modif')::int, 0) = 0
+                             THEN COALESCE((pm.payload->>'Valeur')::numeric, 0)
+                             ELSE COALESCE((pm.payload->>'ValeurModif')::numeric, 0)
+                        END * COALESCE(pr.prix, 0)
+                    ) AS s
+                FROM hfsql_raw_rows pl
+                JOIN hfsql_raw_rows pm
+                  ON pm.table_name = 'P_Pointage_Materiel'
+                 AND pm.tenant_id = pl.tenant_id
+                 AND (pm.payload->>'IDP_Planning')::int = (pl.payload->>'IDP_Planning')::int
+                LEFT JOIN LATERAL (
+                    SELECT (payload->>'PrixImputation')::numeric AS prix
+                    FROM hfsql_raw_rows
+                    WHERE table_name = 'P_Ressource_Prix'
+                      AND tenant_id = pl.tenant_id
+                      AND payload->>'TypeRessource' = 'Materiel'
+                      AND (payload->>'IDRessource')::int = (pm.payload->>'ID_Materiel_Base')::int
+                    ORDER BY (payload->>'APartirDu') DESC
+                    LIMIT 1
+                ) pr ON true
+                WHERE pl.table_name = 'P_Planning'
+                  AND pl.tenant_id = ?
+                GROUP BY pid
+            ", [$tenantId]);
+            foreach ($rows as $r) {
+                $pid = (int) $r->pid;
+                $totaux[$pid] = ($totaux[$pid] ?? 0) + (float) $r->s;
+            }
+        }
+
+        // 4) Location matériel (p_pointage_materiel_location)
+        if ($this->tableExists('p_pointage_materiel_location') && $this->tableExists('P_Ressource_Prix')) {
+            $rows = DB::select("
+                SELECT
+                    (pml.payload->>'ID_Origine')::int AS pid,
+                    SUM(
+                        CASE WHEN COALESCE((pml.payload->>'Modif')::int, 0) = 0
+                             THEN COALESCE((pml.payload->>'Duree')::numeric, 0)
+                             ELSE COALESCE((pml.payload->>'DureeModif')::numeric, 0)
+                        END * COALESCE(pr.prix, 0)
+                    ) AS s
+                FROM hfsql_raw_rows pml
+                LEFT JOIN LATERAL (
+                    SELECT (payload->>'PrixImputation')::numeric AS prix
+                    FROM hfsql_raw_rows
+                    WHERE table_name = 'P_Ressource_Prix'
+                      AND tenant_id = pml.tenant_id
+                      AND payload->>'TypeRessource' = 'Materiel'
+                      AND (payload->>'IDRessource')::int = (pml.payload->>'ID_Materiel')::int
+                    ORDER BY (payload->>'APartirDu') DESC
+                    LIMIT 1
+                ) pr ON true
+                WHERE pml.table_name = 'p_pointage_materiel_location'
+                  AND pml.tenant_id = ?
+                GROUP BY pid
+            ", [$tenantId]);
+            foreach ($rows as $r) {
+                $pid = (int) $r->pid;
+                $totaux[$pid] = ($totaux[$pid] ?? 0) + (float) $r->s;
+            }
+        }
+
+        return $totaux->map(fn ($v) => round((float) $v, 2));
     }
 
     /**
@@ -83,7 +228,7 @@ class ProjetDepensesService
         }
 
         $suivis = $this->rows('S_Com_Suivi')
-            ->whereRaw("payload->>'Type' = 'Vente'")
+            ->whereRaw("UPPER(payload->>'Type') = 'VENTE'")
             ->whereRaw("(payload->>'IDProjet')::int = ?", [$idProjet])
             ->get()
             ->map(fn ($r) => $this->jsonRow($r->payload))
@@ -404,7 +549,7 @@ class ProjetDepensesService
         }
 
         $suivis = $this->rows('S_Com_Suivi')
-            ->whereRaw("payload->>'Type' = 'Achat'")
+            ->whereRaw("UPPER(payload->>'Type') = 'ACHAT'")
             ->whereRaw("(payload->>'IDProjet')::int = ?", [$idProjet])
             ->get()
             ->map(fn ($r) => $this->jsonRow($r->payload))

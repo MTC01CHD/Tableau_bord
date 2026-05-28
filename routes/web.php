@@ -57,5 +57,8 @@ Route::middleware([AuthUser::class, ResolveTenant::class])->group(function () {
         Route::post('/sync/stop', [AdminController::class, 'syncStop'])->name('sync.stop');
         Route::post('/sync/date-range', [AdminController::class, 'syncDateRangeSave'])->name('sync.dates');
         Route::get('/sync/status.json', [AdminController::class, 'syncStatusJson'])->name('sync.status');
+
+        // Schema discovery : dump des payloads HFSQL pour identifier les vrais noms de colonnes
+        Route::get('/schema', [AdminController::class, 'schemaDiscovery'])->name('schema');
     });
 });

@@ -59,6 +59,8 @@ class DashboardController extends Controller
         $realiseAggr = $this->depenses->realiseParProjet();
         $realisePVParProjet = $realiseAggr->map(fn ($r) => $r['pv']);
         $realisePRParProjet = $realiseAggr->map(fn ($r) => $r['pr']);
+        // DÉPENSÉ par projet = Σ achats + personnel + matériel + location
+        $depensesParProjet = $this->depenses->depensesParProjet();
         // Nombre de tâches par projet (indicateur "y a-t-il quelque chose à voir ?")
         $nbTachesParProjet = $this->rawRows()
             ->where('table_name', 'S_Tache')
@@ -202,6 +204,7 @@ class DashboardController extends Controller
             'derapagesOnly', 'sort',
             'prevuPVParProjet', 'prevuPRParProjet',
             'realisePVParProjet', 'realisePRParProjet',
+            'depensesParProjet',
             'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
             'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise',
             'debugEtat'
