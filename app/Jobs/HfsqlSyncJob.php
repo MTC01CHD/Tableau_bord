@@ -21,6 +21,15 @@ class HfsqlSyncJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    /** Force la connexion 'database' (override de QUEUE_CONNECTION) :
+     *  sinon en prod si QUEUE_CONNECTION n'est pas defini sur Laravel Cloud,
+     *  Laravel tombe sur 'sync' (defaut framework) -> le job s'execute
+     *  immediatement dans la requete HTTP au lieu d'etre mis en file. */
+    public string $connection = 'database';
+
+    /** Force le nom de queue 'default' (doit matcher --queue=default du worker). */
+    public string $queue = 'default';
+
     /** Pas de timeout applicatif — base de données massive peut prendre des heures.
      *  Le worker reste sous sa propre limite (cf cmd queue:work). */
     public int $timeout = 0;

@@ -340,6 +340,14 @@ class AdminController extends Controller
             return !$r || $r->status !== 'ok';
         })->isNotEmpty();
 
+        // Diagnostic queue : combien de jobs en attente, combien failed.
+        // Permet de voir si le worker tourne vraiment.
+        $queueDiag = [
+            'connection'      => config('queue.default'),
+            'jobs_pending'    => (int) DB::table('jobs')->where('queue', 'default')->count(),
+            'jobs_failed'     => (int) DB::table('failed_jobs')->count(),
+        ];
+
         return response()->json([
             'is_running'         => $isProcessLive,
             'current_table'      => $running?->table_name,
@@ -349,6 +357,7 @@ class AdminController extends Controller
             'tables_count'       => $rowsAgg->count(),
             'has_resumable'      => $hasResumable,
             'tables'             => $tables,
+            'queue_diag'         => $queueDiag,
         ]);
     }
 }

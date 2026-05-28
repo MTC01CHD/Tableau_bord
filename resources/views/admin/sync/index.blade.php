@@ -13,6 +13,7 @@
                 </h2>
                 <p class="muted" id="live-summary" style="font-size:13px;margin:6px 0 0;">Chargement…</p>
                 <p class="muted" id="live-current" style="font-size:12px;margin:4px 0 0;font-family:monospace;"></p>
+                <p class="muted" id="live-queue" style="font-size:11px;margin:4px 0 0;font-family:monospace;"></p>
             </div>
 
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -190,6 +191,19 @@
                     currentEl.textContent = `→ en cours : ${d.current_table} (depuis ${ago})`;
                 } else {
                     currentEl.textContent = '';
+                }
+
+                // Diag queue : permet de voir d'un coup d'oeil si le worker fait son taf
+                const queueEl = document.getElementById('live-queue');
+                if (queueEl && d.queue_diag) {
+                    const q = d.queue_diag;
+                    const pendingColor = q.jobs_pending > 0 ? 'var(--warn)' : 'var(--muted)';
+                    const failedColor  = q.jobs_failed  > 0 ? 'var(--err)'  : 'var(--muted)';
+                    queueEl.innerHTML =
+                        `queue : <strong>${q.connection}</strong> · ` +
+                        `<span style="color:${pendingColor}">${q.jobs_pending} job(s) en attente</span> · ` +
+                        `<span style="color:${failedColor}">${q.jobs_failed} failed</span>` +
+                        (q.connection === 'sync' ? ' · <span style="color:var(--err);">⚠ connection sync : les jobs bloquent la requête HTTP, le worker ne sert à rien</span>' : '');
                 }
 
                 // Boutons conditionnels
