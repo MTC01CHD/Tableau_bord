@@ -60,16 +60,18 @@ class ProjetDepensesService
 
     private function doRealiseParProjet(int $tenantId): Collection
     {
+        // NULLIF(..., '') sécurise les casts ::int et ::numeric contre les strings vides
+        // qui plantent Postgres ("invalid input syntax for type integer/numeric").
         $rows = DB::select("
             SELECT
-                (sc.payload->>'IDProjet')::int AS pid,
-                SUM(COALESCE((sce.payload->>'Somme_V')::numeric, 0)) AS pv,
-                SUM(COALESCE((sce.payload->>'Somme_R')::numeric, 0)) AS pr
+                NULLIF(sc.payload->>'IDProjet', '')::int AS pid,
+                SUM(COALESCE(NULLIF(sce.payload->>'Somme_V', '')::numeric, 0)) AS pv,
+                SUM(COALESCE(NULLIF(sce.payload->>'Somme_R', '')::numeric, 0)) AS pr
             FROM hfsql_raw_rows sc
             JOIN hfsql_raw_rows sce
               ON sce.table_name = 'S_Com_Suivi_Element'
              AND sce.tenant_id = sc.tenant_id
-             AND (sce.payload->>'IDS_Com_Suivi')::int = (sc.payload->>'IDS_Com_Suivi')::int
+             AND NULLIF(sce.payload->>'IDS_Com_Suivi', '')::int = NULLIF(sc.payload->>'IDS_Com_Suivi', '')::int
             WHERE sc.table_name = 'S_Com_Suivi'
               AND sc.tenant_id = ?
               AND UPPER(COALESCE(sc.payload->>'TYPE', sc.payload->>'Type')) = 'VENTE'
@@ -104,17 +106,17 @@ class ProjetDepensesService
     {
         $totaux = [];
 
-        // 1) Achats : 1 SQL agrégé léger
+        // 1) Achats : 1 SQL agrégé léger (NULLIF pour sécuriser les casts)
         if ($this->tableExists('S_Com_Suivi') && $this->tableExists('S_Com_Suivi_Element')) {
             $rows = DB::select("
                 SELECT
-                    (sc.payload->>'IDProjet')::int AS pid,
-                    SUM(COALESCE((sce.payload->>'Somme_V')::numeric, 0)) AS s
+                    NULLIF(sc.payload->>'IDProjet', '')::int AS pid,
+                    SUM(COALESCE(NULLIF(sce.payload->>'Somme_V', '')::numeric, 0)) AS s
                 FROM hfsql_raw_rows sc
                 JOIN hfsql_raw_rows sce
                   ON sce.table_name = 'S_Com_Suivi_Element'
                  AND sce.tenant_id = sc.tenant_id
-                 AND (sce.payload->>'IDS_Com_Suivi')::int = (sc.payload->>'IDS_Com_Suivi')::int
+                 AND NULLIF(sce.payload->>'IDS_Com_Suivi', '')::int = NULLIF(sc.payload->>'IDS_Com_Suivi', '')::int
                 WHERE sc.table_name = 'S_Com_Suivi'
                   AND sc.tenant_id = ?
                   AND UPPER(COALESCE(sc.payload->>'TYPE', sc.payload->>'Type')) = 'ACHAT'
@@ -136,20 +138,21 @@ class ProjetDepensesService
             $plannings = DB::table('hfsql_raw_rows')
                 ->where('tenant_id', $tenantId)->where('table_name', 'P_Planning')
                 ->selectRaw("
-                    (payload->>'IDP_Planning')::int AS idp,
-                    (payload->>'ID_Origine')::int AS pid,
-                    (payload->>'ID_Personnel_Base')::int AS ipers,
+                    NULLIF(payload->>'IDP_Planning', '')::int AS idp,
+                    NULLIF(payload->>'ID_Origine', '')::int AS pid,
+                    NULLIF(payload->>'ID_Personnel_Base', '')::int AS ipers,
                     payload->>'DateRDZDebut' AS date
                 ")->get();
 
             // Charger tous les pointages effectifs (Duree, modif prioritaire)
             $rows = DB::select("
-                SELECT DISTINCT ON ((payload->>'IDP_Planning')::int)
-                    (payload->>'IDP_Planning')::int AS idp,
-                    (payload->>'Duree')::numeric AS duree
+                SELECT DISTINCT ON (NULLIF(payload->>'IDP_Planning', '')::int)
+                    NULLIF(payload->>'IDP_Planning', '')::int AS idp,
+                    COALESCE(NULLIF(payload->>'Duree', '')::numeric, 0) AS duree
                 FROM hfsql_raw_rows
                 WHERE table_name = 'P_Planning_Pointage' AND tenant_id = ?
-                ORDER BY (payload->>'IDP_Planning')::int, (payload->>'original')::int ASC
+                  AND NULLIF(payload->>'IDP_Planning', '') IS NOT NULL
+                ORDER BY NULLIF(payload->>'IDP_Planning', '')::int, COALESCE(NULLIF(payload->>'original', '')::int, 1) ASC
             ", [$tenantId]);
             $dureesParIdp = [];
             foreach ($rows as $r) $dureesParIdp[(int) $r->idp] = (float) $r->duree;
@@ -173,11 +176,11 @@ class ProjetDepensesService
 
             $rows = DB::select("
                 SELECT
-                    (payload->>'IDP_Planning')::int AS idp,
-                    (payload->>'ID_Materiel_Base')::int AS imat,
-                    COALESCE((payload->>'Modif')::int, 0) AS modif,
-                    COALESCE((payload->>'Valeur')::numeric, 0) AS valeur,
-                    COALESCE((payload->>'ValeurModif')::numeric, 0) AS valeur_modif
+                    NULLIF(payload->>'IDP_Planning', '')::int AS idp,
+                    NULLIF(payload->>'ID_Materiel_Base', '')::int AS imat,
+                    COALESCE(NULLIF(payload->>'Modif', '')::int, 0) AS modif,
+                    COALESCE(NULLIF(payload->>'Valeur', '')::numeric, 0) AS valeur,
+                    COALESCE(NULLIF(payload->>'ValeurModif', '')::numeric, 0) AS valeur_modif
                 FROM hfsql_raw_rows
                 WHERE table_name = 'P_Pointage_Materiel' AND tenant_id = ?
             ", [$tenantId]);
@@ -201,11 +204,11 @@ class ProjetDepensesService
         if ($this->tableExists('p_pointage_materiel_location')) {
             $rows = DB::select("
                 SELECT
-                    (payload->>'ID_Origine')::int AS pid,
-                    (payload->>'ID_Materiel')::int AS imat,
-                    COALESCE((payload->>'Modif')::int, 0) AS modif,
-                    COALESCE((payload->>'Duree')::numeric, 0) AS duree,
-                    COALESCE((payload->>'DureeModif')::numeric, 0) AS duree_modif,
+                    NULLIF(payload->>'ID_Origine', '')::int AS pid,
+                    NULLIF(payload->>'ID_Materiel', '')::int AS imat,
+                    COALESCE(NULLIF(payload->>'Modif', '')::int, 0) AS modif,
+                    COALESCE(NULLIF(payload->>'Duree', '')::numeric, 0) AS duree,
+                    COALESCE(NULLIF(payload->>'DureeModif', '')::numeric, 0) AS duree_modif,
                     payload->>'DatePointage' AS date
                 FROM hfsql_raw_rows
                 WHERE table_name = 'p_pointage_materiel_location' AND tenant_id = ?
