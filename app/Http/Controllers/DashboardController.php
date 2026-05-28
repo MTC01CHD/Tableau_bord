@@ -4,14 +4,19 @@ namespace App\Http\Controllers;
 
 use App\Models\HfsqlSyncRun;
 use App\Models\Projet;
+use App\Services\ProjetDepensesService;
 use App\Support\TenantContext;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
-    public function __construct(private TenantContext $ctx) {}
+    public function __construct(
+        private TenantContext $ctx,
+        private ProjetDepensesService $depenses,
+    ) {}
 
     /** Query builder sur hfsql_raw_rows pré-scopé au tenant courant. */
     private function rawRows(): Builder
@@ -37,18 +42,23 @@ class DashboardController extends Controller
         $base->search($term)->etat($etat);
 
         // ── Agrégats par projet (un seul SQL chacun, lookup par IDProjet) ──
-        // Σ vendu par projet (depuis S_Tache.Somme_V)
-        $ventesParProjet = $this->rawRows()
+        // Prévu en prix de vente par projet (Σ S_Tache.Somme_V)
+        $prevuPVParProjet = $this->rawRows()
             ->where('table_name', 'S_Tache')
             ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_V')::numeric, 0)) AS s")
             ->groupBy('pid')
             ->pluck('s', 'pid');
-        // Σ réalisé par projet (depuis S_Tache.Somme_R)
-        $realisesParProjet = $this->rawRows()
+        // Prévu en prix de revient par projet (Σ S_Tache.Somme_R) — c'est du PRÉVU, pas du réalisé.
+        $prevuPRParProjet = $this->rawRows()
             ->where('table_name', 'S_Tache')
             ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_R')::numeric, 0)) AS s")
             ->groupBy('pid')
             ->pluck('s', 'pid');
+        // RÉALISÉ par projet = Σ éléments de S_Com_Suivi(Type='Vente') — PV et PR
+        // (une seule requête SQL agrégée pour tous les projets).
+        $realiseAggr = $this->depenses->realiseParProjet();
+        $realisePVParProjet = $realiseAggr->map(fn ($r) => $r['pv']);
+        $realisePRParProjet = $realiseAggr->map(fn ($r) => $r['pr']);
         // Nombre de tâches par projet (indicateur "y a-t-il quelque chose à voir ?")
         $nbTachesParProjet = $this->rawRows()
             ->where('table_name', 'S_Tache')
@@ -73,57 +83,61 @@ class DashboardController extends Controller
             ->filter(fn ($v, $k) => $k !== '');
 
         // ── KPI portfolio ──────────────────────────────────────────────────
-        $totalVendu   = (float) $ventesParProjet->sum();
-        $totalRealise = (float) $realisesParProjet->sum();
-        $totalMarge   = $totalVendu - $totalRealise;
+        $totalPrevuPV   = (float) $prevuPVParProjet->sum();
+        $totalPrevuPR   = (float) $prevuPRParProjet->sum();
+        $totalRealisePV = (float) $realisePVParProjet->sum();
+        $totalRealisePR = (float) $realisePRParProjet->sum();
+        $totalMargeRealise = $totalRealisePV - $totalRealisePR;
 
-        // Top 5 dérapages (réalisé > vendu) parmi les projets actifs
+        // Top 5 dérapages : marge réalisée négative (Réalisé PR > Réalisé PV)
         $projetsActifsIds = Projet::actifs()
             ->selectRaw("(payload->>'IDProjet')::int AS pid")
             ->pluck('pid');
 
         $derapages = $projetsActifsIds
-            ->mapWithKeys(fn ($pid) => [$pid => (float) ($realisesParProjet[$pid] ?? 0) - (float) ($ventesParProjet[$pid] ?? 0)])
+            ->mapWithKeys(fn ($pid) => [$pid => (float) ($realisePRParProjet[$pid] ?? 0) - (float) ($realisePVParProjet[$pid] ?? 0)])
             ->filter(fn ($delta) => $delta > 0)
             ->sortDesc()
             ->take(5);
-        // Top 5 mieux maîtrisés (plus grosse marge en €)
+        // Top 5 mieux maîtrisés : plus grosse marge réalisée en €
         $topMarge = $projetsActifsIds
-            ->mapWithKeys(fn ($pid) => [$pid => (float) ($ventesParProjet[$pid] ?? 0) - (float) ($realisesParProjet[$pid] ?? 0)])
+            ->mapWithKeys(fn ($pid) => [$pid => (float) ($realisePVParProjet[$pid] ?? 0) - (float) ($realisePRParProjet[$pid] ?? 0)])
             ->filter(fn ($m) => $m > 0)
             ->sortDesc()
             ->take(5);
 
-        $derapagesEnriched = $this->enrichTopProjets($derapages, 'depassement', $ventesParProjet, $realisesParProjet);
-        $topMargeEnriched  = $this->enrichTopProjets($topMarge,  'marge',         $ventesParProjet, $realisesParProjet);
+        $derapagesEnriched = $this->enrichTopProjets($derapages, 'depassement', $realisePVParProjet, $realisePRParProjet);
+        $topMargeEnriched  = $this->enrichTopProjets($topMarge,  'marge',         $realisePVParProjet, $realisePRParProjet);
 
         $stats = [
-            'total_projets'    => Projet::count(),
-            'projets_actifs'   => Projet::actifs()->count(),
-            'total_vendu'      => $totalVendu,
-            'total_realise'    => $totalRealise,
-            'total_marge'      => $totalMarge,
-            'nb_derapages'     => $derapages->count(),
-            'heures_prevues'   => (float) Projet::actifs()
+            'total_projets'      => Projet::count(),
+            'projets_actifs'     => Projet::actifs()->count(),
+            'total_prevu_pv'     => $totalPrevuPV,
+            'total_prevu_pr'     => $totalPrevuPR,
+            'total_realise_pv'   => $totalRealisePV,
+            'total_realise_pr'   => $totalRealisePR,
+            'total_marge_realise'=> $totalMargeRealise,
+            'nb_derapages'       => $derapages->count(),
+            'heures_prevues'     => (float) Projet::actifs()
                 ->sum(DB::raw("(payload->>'HeuresPrevues')::numeric")),
         ];
 
-        // Données pré-formatées pour le bar chart Vendu vs Réalisé (top 10)
-        $chartVenduRealise = $ventesParProjet
+        // Données pré-formatées pour le bar chart Prévu PV vs Réalisé PV (top 10)
+        $chartVenduRealise = $prevuPVParProjet
             ->map(fn ($v, $pid) => [
                 'pid'     => (int) $pid,
-                'vendu'   => (float) $v,
-                'realise' => (float) ($realisesParProjet[$pid] ?? 0),
+                'vendu'   => (float) $v,                                  // = Prévu PV
+                'realise' => (float) ($realisePVParProjet[$pid] ?? 0),    // = Réalisé PV (facturé)
             ])
             ->sortByDesc('vendu')
             ->take(10)
             ->values()
             ->all();
 
-        // Filtre "dérapages seulement" : on filtre la query par les IDs en dépassement
+        // Filtre "dérapages seulement" : marge réalisée négative
         if ($derapagesOnly) {
-            $derapageIds = $realisesParProjet->filter(function ($r, $pid) use ($ventesParProjet) {
-                return (float) $r > (float) ($ventesParProjet[$pid] ?? 0);
+            $derapageIds = $realisePRParProjet->filter(function ($pr, $pid) use ($realisePVParProjet) {
+                return (float) $pr > (float) ($realisePVParProjet[$pid] ?? 0);
             })->keys()->all();
             if (!empty($derapageIds)) {
                 $base->whereRaw("(payload->>'IDProjet')::int = ANY(?)", ['{' . implode(',', $derapageIds) . '}']);
@@ -142,9 +156,22 @@ class DashboardController extends Controller
         $orderClause = $sortMap[$sort] ?? $sortMap['nom'];
         $projets = $base->orderByRaw($orderClause)->paginate(25)->withQueryString();
 
-        // Liste des états avec libellé pour le filtre
-        $etats = Projet::query()
-            ->selectRaw("payload->>'Etat_Code' as etat, COUNT(*) as n")
+        // Liste des états avec libellé pour le filtre.
+        // On regroupe tolérant à la casse/aux variantes de nom de la clé d'état :
+        // le payload peut être 'Etat_Code', 'EtatCode', 'etat_code', 'IDEtat' selon
+        // comment HFSQL/T-REPORT a sérialisé la colonne. On les essaie en cascade.
+        $etats = $this->rawRows()
+            ->where('table_name', 'S_Projet')
+            ->selectRaw("
+                COALESCE(
+                    NULLIF(payload->>'Etat_Code', ''),
+                    NULLIF(payload->>'EtatCode', ''),
+                    NULLIF(payload->>'etat_code', ''),
+                    NULLIF(payload->>'IDEtat', ''),
+                    NULLIF(payload->>'Etat', '')
+                ) as etat,
+                COUNT(*) as n
+            ")
             ->groupBy('etat')
             ->orderByDesc('n')
             ->get()
@@ -153,14 +180,31 @@ class DashboardController extends Controller
                 return $e;
             });
 
+        // Diagnostic état : si demandé via ?debug=etat, on retourne les clés réelles
+        // d'un payload S_Projet pour voir lesquelles existent vraiment.
+        $debugEtat = null;
+        if ($request->query('debug') === 'etat') {
+            $sample = $this->rawRows()
+                ->where('table_name', 'S_Projet')
+                ->limit(3)
+                ->get();
+            $debugEtat = [
+                'etats_collection' => $etats->toArray(),
+                'sample_payloads_keys' => $sample->map(fn ($r) => array_keys($this->jsonRow($r->payload)))->all(),
+                'sample_payloads' => $sample->map(fn ($r) => $this->jsonRow($r->payload))->all(),
+            ];
+        }
+
         $syncStatus = $this->syncStatus();
 
         return view('dashboard.index', compact(
             'projets', 'stats', 'etats', 'syncStatus', 'term', 'etat', 'only',
             'derapagesOnly', 'sort',
-            'ventesParProjet', 'realisesParProjet',
+            'prevuPVParProjet', 'prevuPRParProjet',
+            'realisePVParProjet', 'realisePRParProjet',
             'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
-            'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise'
+            'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise',
+            'debugEtat'
         ));
     }
 
@@ -176,15 +220,19 @@ class DashboardController extends Controller
         if ($only) $base->actifs();
         $base->search($term)->etat($etat);
 
-        $ventes   = $this->rawRows()->where('table_name', 'S_Tache')
+        // Prévu (S_Tache) et Réalisé (S_Com_Suivi Vente) agrégés par projet
+        $prevuPV = $this->rawRows()->where('table_name', 'S_Tache')
             ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_V')::numeric, 0)) AS s")
             ->groupBy('pid')->pluck('s', 'pid');
-        $realises = $this->rawRows()->where('table_name', 'S_Tache')
+        $prevuPR = $this->rawRows()->where('table_name', 'S_Tache')
             ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_R')::numeric, 0)) AS s")
             ->groupBy('pid')->pluck('s', 'pid');
+        $realiseAggr = $this->depenses->realiseParProjet();
+        $realisePV = $realiseAggr->map(fn ($r) => $r['pv']);
+        $realisePR = $realiseAggr->map(fn ($r) => $r['pr']);
 
         if ($derapagesOnly) {
-            $ids = $realises->filter(fn ($r, $pid) => (float) $r > (float) ($ventes[$pid] ?? 0))->keys()->all();
+            $ids = $realisePR->filter(fn ($pr, $pid) => (float) $pr > (float) ($realisePV[$pid] ?? 0))->keys()->all();
             if (!empty($ids)) $base->whereRaw("(payload->>'IDProjet')::int = ANY(?)", ['{' . implode(',', $ids) . '}']);
             else $base->whereRaw('1=0');
         }
@@ -196,19 +244,25 @@ class DashboardController extends Controller
             });
 
         $filename = 'projets-' . now()->format('Ymd-His') . '.csv';
-        return response()->streamDownload(function () use ($base, $ventes, $realises, $libelles) {
+        return response()->streamDownload(function () use ($base, $prevuPV, $prevuPR, $realisePV, $realisePR, $libelles) {
             $out = fopen('php://output', 'w');
-            // BOM UTF-8 pour Excel
-            fwrite($out, "\xEF\xBB\xBF");
-            fputcsv($out, ['Numero', 'Nom', 'Etat', 'Description', 'DateDebut', 'DateFin', 'HeuresPrevues', 'Vendu', 'Realise', 'Marge', 'Conso%'], ';');
+            fwrite($out, "\xEF\xBB\xBF"); // BOM UTF-8 pour Excel
+            fputcsv($out, [
+                'Numero', 'Nom', 'Etat', 'Description', 'DateDebut', 'DateFin', 'HeuresPrevues',
+                'Prevu_PV', 'Prevu_PR', 'Realise_PV', 'Realise_PR',
+                'Marge_Prevue', 'Marge_Realisee', 'Avancement%',
+            ], ';');
 
-            $base->orderByRaw("payload->>'Nom'")->chunk(200, function ($chunk) use ($out, $ventes, $realises, $libelles) {
+            $base->orderByRaw("payload->>'Nom'")->chunk(200, function ($chunk) use ($out, $prevuPV, $prevuPR, $realisePV, $realisePR, $libelles) {
                 foreach ($chunk as $p) {
                     $pid = $p->id_projet;
-                    $v = (float) ($ventes[$pid] ?? 0);
-                    $r = (float) ($realises[$pid] ?? 0);
-                    $marge = $v - $r;
-                    $conso = $v > 0 ? round(($r / $v) * 100, 1) : 0;
+                    $pPV = (float) ($prevuPV[$pid]   ?? 0);
+                    $pPR = (float) ($prevuPR[$pid]   ?? 0);
+                    $rPV = (float) ($realisePV[$pid] ?? 0);
+                    $rPR = (float) ($realisePR[$pid] ?? 0);
+                    $margePrevue = $pPV - $pPR;
+                    $margeRealisee = $rPV - $rPR;
+                    $avancement = $pPV > 0 ? round(($rPV / $pPV) * 100, 1) : 0;
                     fputcsv($out, [
                         $p->numero,
                         $p->nom,
@@ -217,10 +271,8 @@ class DashboardController extends Controller
                         $p->date_debut?->format('Y-m-d') ?? '',
                         $p->date_fin?->format('Y-m-d') ?? '',
                         $p->heures_prevues,
-                        $v,
-                        $r,
-                        $marge,
-                        $conso,
+                        $pPV, $pPR, $rPV, $rPR,
+                        $margePrevue, $margeRealisee, $avancement,
                     ], ';');
                 }
             });
@@ -244,7 +296,7 @@ class DashboardController extends Controller
         })->values();
     }
 
-    public function projet(int $id)
+    public function projet(int $id, Request $request)
     {
         $projet = Projet::query()
             ->whereRaw("(payload->>'IDProjet')::int = ?", [$id])
@@ -264,186 +316,63 @@ class DashboardController extends Controller
             'S_Departement', 'IDDepartement', $projet->id_departement, 'Nom'
         ) ?? $this->lookupValue('S_Departement', 'IDDepartement', $projet->id_departement, 'Designation');
 
-        // ── Tâches du projet ─────────────────────────────────────────────────
+        // ── Tâches du projet (prévu : Somme_V/Somme_R/Heures) ───────────────
+        // Règle d'exclusion : les options inactives ne comptent pas.
+        // → on garde tout sauf (TypeElement = 'OPTION' AND OptionActive = 0)
         $taches = $this->rawRows()
             ->where('table_name', 'S_Tache')
             ->whereRaw("(payload->>'IDProjet')::int = ?", [$id])
             ->get()
             ->map(fn ($r) => $this->jsonRow($r->payload))
+            ->reject(fn ($t) => strtoupper((string) ($t['TypeElement'] ?? '')) === 'OPTION'
+                && (int) ($t['OptionActive'] ?? 0) === 0)
             ->sortBy(fn ($t) => (int) ($t['Ordre'] ?? 0))
             ->values();
 
-        // ── Plannings du projet (depuis P_Planning) ─────────────────────────
-        $plannings = $this->rawRows()
+        $planningCount = $this->rawRows()
             ->where('table_name', 'P_Planning')
-            ->whereRaw("(payload->>'IDProjet')::int = ?", [$id])
-            ->get()
-            ->map(fn ($r) => $this->jsonRow($r->payload));
+            ->whereRaw("(payload->>'ID_Origine')::int = ?", [$id])
+            ->count();
 
-        $planningCount = $plannings->count();
+        // ── Filtre période (DateDeDebut HFSQL) ───────────────────────────────
+        $from = $this->parsePeriodeDate($request->query('from'));
+        $to   = $this->parsePeriodeDate($request->query('to'), endOfDay: true);
 
-        // ── Heures pointées effectives (règle original/modifié) ──────────────
-        // Pour chaque IDP_Planning de ce projet, prendre la ligne P_Planning_Pointage
-        // non-original si elle existe (correction), sinon l'original.
-        $heuresEffectives = 0.0;
-        $heuresParPersonne = collect();
+        // ── Dépenses par famille (familles dynamiques de S_Famille_Moyen) ──
+        $depenses = $this->depenses->calculer($id, $from, $to);
 
-        $planningIds = $plannings->pluck('IDP_Planning')->filter()->map(fn ($v) => (int) $v)->all();
-        if (!empty($planningIds) && $this->rawRows()->where('table_name', 'P_Planning_Pointage')->exists()) {
-            $pointages = $this->rawRows()
-                ->where('table_name', 'P_Planning_Pointage')
-                ->whereRaw("(payload->>'IDP_Planning')::int = ANY(?)", ['{' . implode(',', $planningIds) . '}'])
-                ->get()
-                ->map(fn ($r) => $this->jsonRow($r->payload));
+        // ── Réalisé (suivis de Type='Vente' : ce qui a été facturé) ─────────
+        $realise = $this->depenses->calculerRealise($id, $from, $to);
 
-            // Garder UN pointage par IDP_Planning : non-original prioritaire
-            $effectifs = $pointages
-                ->groupBy(fn ($p) => $p['IDP_Planning'] ?? null)
-                ->map(function ($group) {
-                    $modif = $group->first(fn ($p) => !((int) ($p['original'] ?? 1)));
-                    return $modif ?: $group->first();
-                })
-                ->values();
-
-            // Mapper plannings par ID pour récupérer la personne
-            $planningById = $plannings->keyBy(fn ($p) => (int) ($p['IDP_Planning'] ?? 0));
-
-            foreach ($effectifs as $p) {
-                $heures = (float) ($p['Heures'] ?? $p['NbHeures'] ?? 0);
-                $heuresEffectives += $heures;
-
-                $idPlanning = (int) ($p['IDP_Planning'] ?? 0);
-                $idPers     = $planningById[$idPlanning]['IDPersonnel'] ?? null;
-                if ($idPers) {
-                    $heuresParPersonne[$idPers] = ($heuresParPersonne[$idPers] ?? 0) + $heures;
-                }
+        // Heures personnel et matériel à partir des familles correspondantes
+        $heuresPersonnel = 0.0;
+        $heuresMateriel  = 0.0;
+        foreach ($depenses['familles'] as $f) {
+            if ($f['par_defaut']) {
+                $heuresPersonnel += (float) $f['lignes']->sum('qte');
+            } elseif ($f['materiel']) {
+                $heuresMateriel += (float) $f['lignes']->sum('qte');
             }
-        }
-
-        // ── Tarifs : P_Ressource_Prix (index par IDPersonnel et IDMateriel) ──
-        $tarifsPersonnel = $this->loadTarifs('IDPersonnel');
-        $tarifsMateriel  = $this->loadTarifs('IDMateriel');
-
-        // ── Coût MO estimé = Σ (heures pointées × tarif personnel) ──────────
-        $coutMO = 0.0;
-        $topContributeurs = $heuresParPersonne
-            ->sortDesc()
-            ->take(10)
-            ->map(function ($h, $idPers) use ($tarifsPersonnel, &$coutMO) {
-                $row = $this->lookupRow('S_Personnel', 'IDPersonnel', $idPers);
-                $nom = $row
-                    ? trim(($row['Prenom'] ?? '') . ' ' . ($row['Nom'] ?? '')) ?: ($row['Login'] ?? "Personnel #{$idPers}")
-                    : "Personnel #{$idPers}";
-                $tarif = (float) ($tarifsPersonnel[$idPers] ?? 0);
-                $cout  = round($h * $tarif, 2);
-                return ['nom' => $nom, 'heures' => round($h, 2), 'tarif' => $tarif, 'cout' => $cout];
-            })
-            ->values();
-        // Coût total MO (toutes les personnes, pas seulement le top 10)
-        foreach ($heuresParPersonne as $idPers => $h) {
-            $coutMO += $h * (float) ($tarifsPersonnel[$idPers] ?? 0);
-        }
-        $coutMO = round($coutMO, 2);
-
-        // ── Heures matériel + coût matériel ────────────────────────────────
-        $matTable = $this->detectMaterielTable();
-        $heuresParMateriel = collect();
-        $coutMateriel = 0.0;
-        if ($matTable) {
-            // Plusieurs schémas possibles : la table peut avoir IDProjet direct,
-            // ou être liée par IDP_Planning à un planning du projet.
-            $rowsMat = $this->rawRows()
-                ->where('table_name', $matTable)
-                ->where(function ($q) use ($id, $planningIds) {
-                    $q->whereRaw("(payload->>'IDProjet')::int = ?", [$id]);
-                    if (!empty($planningIds)) {
-                        $q->orWhereRaw(
-                            "(payload->>'IDP_Planning')::int = ANY(?)",
-                            ['{' . implode(',', $planningIds) . '}']
-                        );
-                    }
-                })
-                ->get()
-                ->map(fn ($r) => $this->jsonRow($r->payload));
-
-            foreach ($rowsMat as $pm) {
-                $idMat  = $pm['IDMateriel'] ?? $pm['IDP_Materiel'] ?? null;
-                $heures = (float) ($pm['Heures'] ?? $pm['NbHeures'] ?? $pm['Quantite'] ?? $pm['Duree'] ?? 0);
-                if (!$idMat || $heures <= 0) continue;
-                $heuresParMateriel[$idMat] = ($heuresParMateriel[$idMat] ?? 0) + $heures;
-                $coutMateriel += $heures * (float) ($tarifsMateriel[$idMat] ?? 0);
-            }
-        }
-        $coutMateriel = round($coutMateriel, 2);
-
-        $topMateriel = $heuresParMateriel
-            ->sortDesc()
-            ->take(10)
-            ->map(function ($h, $idMat) use ($tarifsMateriel) {
-                $row = $this->lookupRow('P_Materiel', 'IDMateriel', $idMat)
-                    ?? $this->lookupRow('S_Moyen', 'IDMoyen', $idMat);
-                $nom = $row['Designation'] ?? $row['Nom'] ?? $row['Libelle'] ?? "Matériel #{$idMat}";
-                $tarif = (float) ($tarifsMateriel[$idMat] ?? 0);
-                $cout  = round($h * $tarif, 2);
-                return ['nom' => $nom, 'heures' => round($h, 2), 'tarif' => $tarif, 'cout' => $cout];
-            })
-            ->values();
-
-        $coutTotal = round($coutMO + $coutMateriel, 2);
-
-        // ── Dépensé par famille via S_Com_Suivi_Element (si dispo) ──────────
-        $depenseParFamille = collect();
-        if ($this->rawRows()->where('table_name', 'S_Com_Suivi_Element')->exists()) {
-            $depenseParFamille = $this->rawRows()
-                ->where('table_name', 'S_Com_Suivi_Element')
-                ->whereRaw("(payload->>'IDProjet')::int = ?", [$id])
-                ->get();
         }
 
         return view('dashboard.projet', compact(
             'projet', 'etatLibelle', 'gestionnaireNom', 'departementNom',
-            'taches', 'planningCount', 'heuresEffectives', 'topContributeurs',
-            'coutMO', 'coutMateriel', 'coutTotal', 'topMateriel', 'matTable',
-            'depenseParFamille'
+            'taches', 'planningCount',
+            'depenses', 'realise', 'heuresPersonnel', 'heuresMateriel',
+            'from', 'to'
         ));
     }
 
-    /**
-     * Construit un index id → tarif horaire depuis P_Ressource_Prix.
-     * `$idCol` = IDPersonnel ou IDMateriel.
-     * Si plusieurs lignes existent (historique de tarifs), on garde la dernière non-vide.
-     */
-    private function loadTarifs(string $idCol): array
+    /** Parse une date YYYY-MM-DD venant d'un input type=date, optionnellement fin de journée. */
+    private function parsePeriodeDate(?string $val, bool $endOfDay = false): ?CarbonImmutable
     {
-        if (!$this->rawRows()->where('table_name', 'P_Ressource_Prix')->exists()) {
-            return [];
+        if (!$val) return null;
+        try {
+            $d = CarbonImmutable::parse($val);
+            return $endOfDay ? $d->endOfDay() : $d->startOfDay();
+        } catch (\Throwable) {
+            return null;
         }
-        $rows = $this->rawRows()
-            ->where('table_name', 'P_Ressource_Prix')
-            ->get()
-            ->map(fn ($r) => $this->jsonRow($r->payload));
-
-        $out = [];
-        foreach ($rows as $r) {
-            $id = $r[$idCol] ?? null;
-            if (!$id) continue;
-            // Colonnes prix possibles, par ordre de priorité
-            $tarif = (float) ($r['PrixHoraire'] ?? $r['Tarif'] ?? $r['Prix']
-                ?? $r['PrixUnitaire'] ?? $r['Montant'] ?? 0);
-            if ($tarif > 0) $out[$id] = $tarif;
-        }
-        return $out;
-    }
-
-    /** Détecte la 1ère table de pointage matériel synchronisée. */
-    private function detectMaterielTable(): ?string
-    {
-        foreach (['p_pointage_materiel_location', 'P_Pointage_Materiel_Affectation', 'P_Pointage_Materiel'] as $name) {
-            if ($this->rawRows()->where('table_name', $name)->exists()) {
-                return $name;
-            }
-        }
-        return null;
     }
 
     /** Décode un payload JSONB (string ou objet). */

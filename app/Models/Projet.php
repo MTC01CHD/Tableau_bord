@@ -41,7 +41,17 @@ class Projet extends HfsqlRawRow
 
     public function getEtatAttribute(): string
     {
-        return (string) ($this->payload['Etat_Code'] ?? '');
+        // Tolérant aux variantes de casse/nom selon la sérialisation HFSQL.
+        // À simplifier vers une seule clé une fois la vraie identifiée via ?debug=etat.
+        $p = $this->payload ?? [];
+        return (string) (
+            $p['Etat_Code']
+            ?? $p['EtatCode']
+            ?? $p['etat_code']
+            ?? $p['IDEtat']
+            ?? $p['Etat']
+            ?? ''
+        );
     }
 
     public function getHeuresPrevuesAttribute(): float
@@ -96,6 +106,16 @@ class Projet extends HfsqlRawRow
     /** Filtre par état (A_PLANIFIER, EN_COURS, …). */
     public function scopeEtat(Builder $q, ?string $etat): Builder
     {
-        return $etat ? $q->whereRaw("payload->>'Etat_Code' = ?", [$etat]) : $q;
+        if (!$etat) return $q;
+        // Mêmes variantes que getEtatAttribute()
+        return $q->whereRaw("
+            COALESCE(
+                NULLIF(payload->>'Etat_Code', ''),
+                NULLIF(payload->>'EtatCode', ''),
+                NULLIF(payload->>'etat_code', ''),
+                NULLIF(payload->>'IDEtat', ''),
+                NULLIF(payload->>'Etat', '')
+            ) = ?
+        ", [$etat]);
     }
 }

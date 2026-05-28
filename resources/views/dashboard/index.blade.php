@@ -4,6 +4,26 @@
 
 @section('content')
 
+    {{-- ── Diagnostic état (visible avec ?debug=etat) ──────────────────── --}}
+    @if (!empty($debugEtat))
+        <div class="card" style="margin-bottom:16px;border:2px dashed var(--warn);">
+            <h2 style="color:var(--warn);">🛠 Diagnostic filtre état</h2>
+            <p class="muted" style="font-size:12px;">
+                Visible parce que <code>?debug=etat</code>. Copie-moi ce qui apparaît ici
+                pour qu'on identifie le vrai nom de la colonne d'état dans ton payload S_Projet.
+            </p>
+
+            <h3 style="margin-top:12px;font-size:14px;">Collection <code>$etats</code> (ce qui alimente le dropdown)</h3>
+            <pre style="background:var(--panel2);padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:200px;">{{ json_encode($debugEtat['etats_collection'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) }}</pre>
+
+            <h3 style="margin-top:12px;font-size:14px;">Clés présentes dans les 3 premiers payloads S_Projet</h3>
+            <pre style="background:var(--panel2);padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:300px;">{{ json_encode($debugEtat['sample_payloads_keys'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) }}</pre>
+
+            <h3 style="margin-top:12px;font-size:14px;">Échantillon complet (3 projets)</h3>
+            <pre style="background:var(--panel2);padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:400px;">{{ json_encode($debugEtat['sample_payloads'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) }}</pre>
+        </div>
+    @endif
+
     {{-- ── Bandeau sync (état de fraîcheur des données) ──────────────────── --}}
     <div class="card" style="margin-bottom:16px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
@@ -32,20 +52,22 @@
             <span class="kpi-value">{{ number_format($stats['projets_actifs'],0,',',' ') }}<small style="font-size:14px;color:var(--muted);"> / {{ number_format($stats['total_projets'],0,',',' ') }}</small></span>
         </div>
         <div class="card kpi">
-            <span class="kpi-label">Total vendu (Σ Somme_V)</span>
-            <span class="kpi-value">{{ number_format($stats['total_vendu'],0,',',' ') }} €</span>
+            <span class="kpi-label">Prévu PV (Σ Somme_V)</span>
+            <span class="kpi-value">{{ number_format($stats['total_prevu_pv'],0,',',' ') }} €</span>
+            <span class="muted">prix de vente prévu — autorisé</span>
         </div>
         <div class="card kpi">
-            <span class="kpi-label">Total réalisé (Σ Somme_R)</span>
-            <span class="kpi-value">{{ number_format($stats['total_realise'],0,',',' ') }} €</span>
+            <span class="kpi-label">Réalisé PV (S_Com_Suivi Vente)</span>
+            <span class="kpi-value" style="color:var(--ok);">{{ number_format($stats['total_realise_pv'],0,',',' ') }} €</span>
+            <span class="muted">Σ Quantité × PU_V facturés</span>
         </div>
         <div class="card kpi">
-            <span class="kpi-label">Marge globale</span>
-            <span class="kpi-value" style="color:{{ $stats['total_marge'] >= 0 ? 'var(--ok)' : 'var(--err)' }};">
-                {{ number_format($stats['total_marge'],0,',',' ') }} €
+            <span class="kpi-label">Marge réalisée (PV − PR)</span>
+            <span class="kpi-value" style="color:{{ $stats['total_marge_realise'] >= 0 ? 'var(--ok)' : 'var(--err)' }};">
+                {{ number_format($stats['total_marge_realise'],0,',',' ') }} €
             </span>
             @if ($stats['nb_derapages'] > 0)
-                <span class="muted" style="font-size:12px;">{{ $stats['nb_derapages'] }} projet(s) en dépassement</span>
+                <span class="muted" style="font-size:12px;color:var(--err);">{{ $stats['nb_derapages'] }} projet(s) en marge négative</span>
             @endif
         </div>
     </div>
@@ -53,7 +75,7 @@
     {{-- ── Tops portfolio (dérapages + marges) ──────────────────────────── --}}
     <div class="grid grid-2" style="margin-bottom:16px;">
         <div class="card">
-            <h2 style="color:var(--err);">🔴 Top 5 dérapages (réalisé &gt; vendu)</h2>
+            <h2 style="color:var(--err);">🔴 Top 5 marges négatives (Réalisé PR &gt; Réalisé PV)</h2>
             @if ($derapagesEnriched->isEmpty())
                 <p class="muted">Aucun projet en dépassement parmi les projets actifs.</p>
             @else
@@ -102,7 +124,7 @@
             <canvas id="chart-etats" style="max-height:240px;"></canvas>
         </div>
         <div class="card">
-            <h2>Vendu vs réalisé (top 10 projets actifs par vendu)</h2>
+            <h2>Prévu PV vs Réalisé PV (top 10 par prévu)</h2>
             <canvas id="chart-vendu-realise" style="max-height:240px;"></canvas>
         </div>
     </div>
@@ -165,53 +187,53 @@
                 <thead>
                     <tr>
                         <th>N°</th><th>Nom</th><th>État</th>
-                        <th style="text-align:right;" title="Σ Somme_V des tâches">Vendu</th>
-                        <th style="text-align:right;" title="Σ Somme_R des tâches">Réalisé</th>
-                        <th style="text-align:right;">Marge</th>
-                        <th title="% consommation (Réalisé / Vendu)">Conso</th>
+                        <th style="text-align:right;" title="Prévu en prix de vente — Σ S_Tache.Somme_V">Prévu PV</th>
+                        <th style="text-align:right;" title="Réalisé en prix de vente — Σ S_Com_Suivi_Element (Type=Vente)">Réalisé PV</th>
+                        <th style="text-align:right;" title="Réalisé en prix de revient — même source × PU_R">Réalisé PR</th>
+                        <th style="text-align:right;" title="Marge réalisée = Réalisé PV − Réalisé PR">Marge</th>
+                        <th title="% avancement = Réalisé PV / Prévu PV">Avanc.</th>
                         <th style="text-align:center;" title="Tâches · Plannings disponibles">Données</th>
                         <th>Début</th>
                         <th></th>
                     </tr>
                 </thead>
                 @php
-                    $pageVendu = 0; $pageRealise = 0;
+                    $pagePrevuPV = 0; $pageRealisePV = 0; $pageRealisePR = 0;
                 @endphp
                 <tbody>
                     @foreach ($projets as $p)
                         @php
                             $pid = $p->id_projet;
-                            $v = (float) ($ventesParProjet[$pid]   ?? 0);
-                            $r = (float) ($realisesParProjet[$pid] ?? 0);
-                            $marge = $v - $r;
-                            $pageVendu += $v; $pageRealise += $r;
-                            $pctConso = $v > 0 ? min(round(($r / $v) * 100, 1), 200) : 0;
-                            $isDerapage = $v > 0 && $r > $v;
+                            $pPV = (float) ($prevuPVParProjet[$pid]    ?? 0);
+                            $rPV = (float) ($realisePVParProjet[$pid]  ?? 0);
+                            $rPR = (float) ($realisePRParProjet[$pid]  ?? 0);
+                            $marge = $rPV - $rPR;
+                            $pagePrevuPV += $pPV; $pageRealisePV += $rPV; $pageRealisePR += $rPR;
+                            $pctAvanc = $pPV > 0 ? min(round(($rPV / $pPV) * 100, 1), 200) : 0;
+                            $isMargeNeg = ($rPV > 0 || $rPR > 0) && $marge < 0;
                             $nbT = (int) ($nbTachesParProjet[$pid]    ?? 0);
                             $nbP = (int) ($nbPlanningsParProjet[$pid] ?? 0);
                             $etatLib = $libellesEtats[$p->etat] ?? $p->etat;
                         @endphp
-                        <tr style="{{ $isDerapage ? 'background: rgba(239,68,68,0.06);' : '' }}">
+                        <tr style="{{ $isMargeNeg ? 'background: rgba(239,68,68,0.06);' : '' }}">
                             <td><code>{{ $p->numero }}</code></td>
                             <td><strong>{{ \Illuminate\Support\Str::limit($p->nom, 40) }}</strong></td>
                             <td>
                                 <span class="badge {{ str_contains($p->etat, 'CHANTIER') ? 'ok' : (str_contains($p->etat, 'PLANIFI') ? 'run' : '') }}">{{ $etatLib ?: '—' }}</span>
                             </td>
-                            <td style="text-align:right;">{{ $v > 0 ? number_format($v, 0, ',', ' ') . ' €' : '—' }}</td>
-                            <td style="text-align:right;">{{ $r > 0 ? number_format($r, 0, ',', ' ') . ' €' : '—' }}</td>
+                            <td style="text-align:right;">{{ $pPV > 0 ? number_format($pPV, 0, ',', ' ') . ' €' : '—' }}</td>
+                            <td style="text-align:right;">{{ $rPV > 0 ? number_format($rPV, 0, ',', ' ') . ' €' : '—' }}</td>
+                            <td style="text-align:right;">{{ $rPR > 0 ? number_format($rPR, 0, ',', ' ') . ' €' : '—' }}</td>
                             <td style="text-align:right;{{ $marge != 0 ? 'color:' . ($marge >= 0 ? 'var(--ok)' : 'var(--err)') . ';font-weight:600;' : '' }}">
-                                {{ ($v > 0 || $r > 0) ? number_format($marge, 0, ',', ' ') . ' €' : '—' }}
+                                {{ ($rPV > 0 || $rPR > 0) ? number_format($marge, 0, ',', ' ') . ' €' : '—' }}
                             </td>
                             <td style="min-width:120px;">
-                                @if ($v > 0)
+                                @if ($pPV > 0)
                                     <div style="display:flex;align-items:center;gap:6px;font-size:11px;">
                                         <div style="flex:1;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;position:relative;">
-                                            <div style="height:100%;width:{{ min($pctConso, 100) }}%;background:{{ $isDerapage ? 'var(--err)' : ($pctConso >= 80 ? 'var(--warn)' : 'var(--accent)') }};"></div>
-                                            @if ($isDerapage)
-                                                <div style="position:absolute;top:0;right:0;width:{{ min($pctConso - 100, 50) }}%;height:100%;background:repeating-linear-gradient(45deg,var(--err),var(--err) 3px,transparent 3px,transparent 6px);"></div>
-                                            @endif
+                                            <div style="height:100%;width:{{ min($pctAvanc, 100) }}%;background:{{ $pctAvanc > 100 ? 'var(--warn)' : 'var(--accent)' }};"></div>
                                         </div>
-                                        <span style="font-family:monospace;{{ $isDerapage ? 'color:var(--err);font-weight:600;' : '' }}">{{ $pctConso }}%</span>
+                                        <span style="font-family:monospace;{{ $pctAvanc > 100 ? 'color:var(--warn);font-weight:600;' : '' }}">{{ $pctAvanc }}%</span>
                                     </div>
                                 @else
                                     <span class="muted" style="font-size:11px;">—</span>
@@ -226,17 +248,18 @@
                         </tr>
                     @endforeach
                 </tbody>
-                @php $pageMarge = $pageVendu - $pageRealise; @endphp
+                @php $pageMarge = $pageRealisePV - $pageRealisePR; @endphp
                 <tfoot>
                     <tr style="border-top:2px solid var(--accent);background:var(--panel2);">
                         <td colspan="3" style="font-weight:600;">TOTAL page ({{ $projets->count() }} projets)</td>
-                        <td style="text-align:right;font-weight:600;">{{ number_format($pageVendu, 0, ',', ' ') }} €</td>
-                        <td style="text-align:right;font-weight:600;">{{ number_format($pageRealise, 0, ',', ' ') }} €</td>
+                        <td style="text-align:right;font-weight:600;">{{ number_format($pagePrevuPV, 0, ',', ' ') }} €</td>
+                        <td style="text-align:right;font-weight:600;">{{ number_format($pageRealisePV, 0, ',', ' ') }} €</td>
+                        <td style="text-align:right;font-weight:600;">{{ number_format($pageRealisePR, 0, ',', ' ') }} €</td>
                         <td style="text-align:right;font-weight:600;color:{{ $pageMarge >= 0 ? 'var(--ok)' : 'var(--err)' }};">
                             {{ number_format($pageMarge, 0, ',', ' ') }} €
                         </td>
                         <td colspan="4" class="muted" style="font-size:11px;">
-                            ({{ $projets->total() }} au total · pagine pour voir tout · totaux globaux dans les KPI en haut)
+                            ({{ $projets->total() }} au total · totaux globaux dans les KPI en haut)
                         </td>
                     </tr>
                 </tfoot>
