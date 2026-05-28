@@ -74,18 +74,20 @@ class ProjetDepensesService
 
     /**
      * Dépensé agrégé par projet (pour la liste).
-     * Somme les 3 sources possibles : achats (S_Com_Suivi.Type='Achat'),
-     * personnel (P_Planning × P_Planning_Pointage × P_Ressource_Prix),
-     * matériel (P_Pointage_Materiel + p_pointage_materiel_location × P_Ressource_Prix).
+     *
+     * IMPORTANT : version optimisée — on évite les LATERAL JOIN par ligne sur
+     * P_Ressource_Prix (trop lents sur JSONB pour 100+ projets). À la place :
+     * 1) Achats agrégés par projet (1 SQL léger)
+     * 2) Personnel et Matériel calculés en PHP via dictionnaires en mémoire
      *
      * @return Collection<int, float> idProjet => total dépensé
      */
     public function depensesParProjet(): Collection
     {
         $tenantId = $this->ctx->requireId();
-        $totaux = collect();
+        $totaux = [];
 
-        // 1) Achats : Σ Somme_V des éléments dont le suivi est Type='Achat'
+        // 1) Achats : 1 SQL agrégé léger
         if ($this->tableExists('S_Com_Suivi') && $this->tableExists('S_Com_Suivi_Element')) {
             $rows = DB::select("
                 SELECT
@@ -107,113 +109,105 @@ class ProjetDepensesService
             }
         }
 
-        // 2) Personnel : Σ Duree (modif prioritaire sur original) × tarif Personnel
-        if ($this->tableExists('P_Planning') && $this->tableExists('P_Planning_Pointage') && $this->tableExists('P_Ressource_Prix')) {
-            $rows = DB::select("
-                WITH pointage_effectif AS (
-                    -- Pour chaque IDP_Planning, on prend Duree de la modif (original=0) si elle existe, sinon original=1
-                    SELECT DISTINCT ON ((payload->>'IDP_Planning')::int)
-                        (payload->>'IDP_Planning')::int AS idp,
-                        (payload->>'Duree')::numeric AS duree
-                    FROM hfsql_raw_rows
-                    WHERE table_name = 'P_Planning_Pointage'
-                      AND tenant_id = ?
-                    ORDER BY (payload->>'IDP_Planning')::int, (payload->>'original')::int ASC
-                )
-                SELECT
-                    (pl.payload->>'ID_Origine')::int AS pid,
-                    SUM(COALESCE(pe.duree, 0) * COALESCE(pr.prix, 0)) AS s
-                FROM hfsql_raw_rows pl
-                JOIN pointage_effectif pe ON pe.idp = (pl.payload->>'IDP_Planning')::int
-                LEFT JOIN LATERAL (
-                    SELECT (payload->>'PrixImputation')::numeric AS prix
-                    FROM hfsql_raw_rows
-                    WHERE table_name = 'P_Ressource_Prix'
-                      AND tenant_id = pl.tenant_id
-                      AND payload->>'TypeRessource' = 'Personnel'
-                      AND (payload->>'IDRessource')::int = (pl.payload->>'ID_Personnel_Base')::int
-                    ORDER BY (payload->>'APartirDu') DESC
-                    LIMIT 1
-                ) pr ON true
-                WHERE pl.table_name = 'P_Planning'
-                  AND pl.tenant_id = ?
-                GROUP BY pid
-            ", [$tenantId, $tenantId]);
-            foreach ($rows as $r) {
-                $pid = (int) $r->pid;
-                $totaux[$pid] = ($totaux[$pid] ?? 0) + (float) $r->s;
-            }
-        }
+        // 2) Pré-charger les tarifs en mémoire pour éviter les LATERAL JOIN
+        $tarifsPersonnel = $this->loadTarifs('Personnel');
+        $tarifsMateriel  = $this->loadTarifs('Materiel');
 
-        // 3) Matériel (P_Pointage_Materiel) : Valeur ou ValeurModif × tarif Materiel
-        if ($this->tableExists('P_Planning') && $this->tableExists('P_Pointage_Materiel') && $this->tableExists('P_Ressource_Prix')) {
+        // 3) Personnel : map IDP_Planning -> Duree effective (modif prioritaire)
+        if ($this->tableExists('P_Planning') && $this->tableExists('P_Planning_Pointage')) {
+            // Charger tous les plannings : IDP_Planning -> [ID_Origine, ID_Personnel_Base, date]
+            $plannings = DB::table('hfsql_raw_rows')
+                ->where('tenant_id', $tenantId)->where('table_name', 'P_Planning')
+                ->selectRaw("
+                    (payload->>'IDP_Planning')::int AS idp,
+                    (payload->>'ID_Origine')::int AS pid,
+                    (payload->>'ID_Personnel_Base')::int AS ipers,
+                    payload->>'DateRDZDebut' AS date
+                ")->get();
+
+            // Charger tous les pointages effectifs (Duree, modif prioritaire)
             $rows = DB::select("
-                SELECT
-                    (pl.payload->>'ID_Origine')::int AS pid,
-                    SUM(
-                        CASE WHEN COALESCE((pm.payload->>'Modif')::int, 0) = 0
-                             THEN COALESCE((pm.payload->>'Valeur')::numeric, 0)
-                             ELSE COALESCE((pm.payload->>'ValeurModif')::numeric, 0)
-                        END * COALESCE(pr.prix, 0)
-                    ) AS s
-                FROM hfsql_raw_rows pl
-                JOIN hfsql_raw_rows pm
-                  ON pm.table_name = 'P_Pointage_Materiel'
-                 AND pm.tenant_id = pl.tenant_id
-                 AND (pm.payload->>'IDP_Planning')::int = (pl.payload->>'IDP_Planning')::int
-                LEFT JOIN LATERAL (
-                    SELECT (payload->>'PrixImputation')::numeric AS prix
-                    FROM hfsql_raw_rows
-                    WHERE table_name = 'P_Ressource_Prix'
-                      AND tenant_id = pl.tenant_id
-                      AND payload->>'TypeRessource' = 'Materiel'
-                      AND (payload->>'IDRessource')::int = (pm.payload->>'ID_Materiel_Base')::int
-                    ORDER BY (payload->>'APartirDu') DESC
-                    LIMIT 1
-                ) pr ON true
-                WHERE pl.table_name = 'P_Planning'
-                  AND pl.tenant_id = ?
-                GROUP BY pid
+                SELECT DISTINCT ON ((payload->>'IDP_Planning')::int)
+                    (payload->>'IDP_Planning')::int AS idp,
+                    (payload->>'Duree')::numeric AS duree
+                FROM hfsql_raw_rows
+                WHERE table_name = 'P_Planning_Pointage' AND tenant_id = ?
+                ORDER BY (payload->>'IDP_Planning')::int, (payload->>'original')::int ASC
             ", [$tenantId]);
-            foreach ($rows as $r) {
-                $pid = (int) $r->pid;
-                $totaux[$pid] = ($totaux[$pid] ?? 0) + (float) $r->s;
+            $dureesParIdp = [];
+            foreach ($rows as $r) $dureesParIdp[(int) $r->idp] = (float) $r->duree;
+
+            foreach ($plannings as $pl) {
+                $pid = (int) $pl->pid; $ipers = (int) $pl->ipers; $idp = (int) $pl->idp;
+                $duree = $dureesParIdp[$idp] ?? 0;
+                if (!$pid || !$ipers || $duree <= 0) continue;
+                $date = HfsqlDate::parse($pl->date);
+                if (!$date) continue;
+                $prix = $this->tarifAt($tarifsPersonnel[$ipers] ?? [], $date);
+                if ($prix <= 0) continue;
+                $totaux[$pid] = ($totaux[$pid] ?? 0) + ($duree * $prix);
             }
         }
 
-        // 4) Location matériel (p_pointage_materiel_location)
-        if ($this->tableExists('p_pointage_materiel_location') && $this->tableExists('P_Ressource_Prix')) {
+        // 4) Matériel sur planning
+        if ($this->tableExists('P_Planning') && $this->tableExists('P_Pointage_Materiel') && isset($plannings)) {
+            $planningsById = [];
+            foreach ($plannings as $pl) $planningsById[(int) $pl->idp] = $pl;
+
             $rows = DB::select("
                 SELECT
-                    (pml.payload->>'ID_Origine')::int AS pid,
-                    SUM(
-                        CASE WHEN COALESCE((pml.payload->>'Modif')::int, 0) = 0
-                             THEN COALESCE((pml.payload->>'Duree')::numeric, 0)
-                             ELSE COALESCE((pml.payload->>'DureeModif')::numeric, 0)
-                        END * COALESCE(pr.prix, 0)
-                    ) AS s
-                FROM hfsql_raw_rows pml
-                LEFT JOIN LATERAL (
-                    SELECT (payload->>'PrixImputation')::numeric AS prix
-                    FROM hfsql_raw_rows
-                    WHERE table_name = 'P_Ressource_Prix'
-                      AND tenant_id = pml.tenant_id
-                      AND payload->>'TypeRessource' = 'Materiel'
-                      AND (payload->>'IDRessource')::int = (pml.payload->>'ID_Materiel')::int
-                    ORDER BY (payload->>'APartirDu') DESC
-                    LIMIT 1
-                ) pr ON true
-                WHERE pml.table_name = 'p_pointage_materiel_location'
-                  AND pml.tenant_id = ?
-                GROUP BY pid
+                    (payload->>'IDP_Planning')::int AS idp,
+                    (payload->>'ID_Materiel_Base')::int AS imat,
+                    COALESCE((payload->>'Modif')::int, 0) AS modif,
+                    COALESCE((payload->>'Valeur')::numeric, 0) AS valeur,
+                    COALESCE((payload->>'ValeurModif')::numeric, 0) AS valeur_modif
+                FROM hfsql_raw_rows
+                WHERE table_name = 'P_Pointage_Materiel' AND tenant_id = ?
             ", [$tenantId]);
+
             foreach ($rows as $r) {
-                $pid = (int) $r->pid;
-                $totaux[$pid] = ($totaux[$pid] ?? 0) + (float) $r->s;
+                $pl = $planningsById[(int) $r->idp] ?? null;
+                if (!$pl) continue;
+                $pid = (int) $pl->pid; $imat = (int) $r->imat;
+                if (!$pid || !$imat) continue;
+                $qte = $r->modif === 0 ? (float) $r->valeur : (float) $r->valeur_modif;
+                if ($qte <= 0) continue;
+                $date = HfsqlDate::parse($pl->date);
+                if (!$date) continue;
+                $prix = $this->tarifAt($tarifsMateriel[$imat] ?? [], $date);
+                if ($prix <= 0) continue;
+                $totaux[$pid] = ($totaux[$pid] ?? 0) + ($qte * $prix);
             }
         }
 
-        return $totaux->map(fn ($v) => round((float) $v, 2));
+        // 5) Location matériel
+        if ($this->tableExists('p_pointage_materiel_location')) {
+            $rows = DB::select("
+                SELECT
+                    (payload->>'ID_Origine')::int AS pid,
+                    (payload->>'ID_Materiel')::int AS imat,
+                    COALESCE((payload->>'Modif')::int, 0) AS modif,
+                    COALESCE((payload->>'Duree')::numeric, 0) AS duree,
+                    COALESCE((payload->>'DureeModif')::numeric, 0) AS duree_modif,
+                    payload->>'DatePointage' AS date
+                FROM hfsql_raw_rows
+                WHERE table_name = 'p_pointage_materiel_location' AND tenant_id = ?
+            ", [$tenantId]);
+
+            foreach ($rows as $r) {
+                $pid = (int) $r->pid; $imat = (int) $r->imat;
+                if (!$pid || !$imat) continue;
+                $qte = $r->modif === 0 ? (float) $r->duree : (float) $r->duree_modif;
+                if ($qte <= 0) continue;
+                $date = HfsqlDate::parse($r->date);
+                if (!$date) continue;
+                $prix = $this->tarifAt($tarifsMateriel[$imat] ?? [], $date);
+                if ($prix <= 0) continue;
+                $totaux[$pid] = ($totaux[$pid] ?? 0) + ($qte * $prix);
+            }
+        }
+
+        return collect($totaux)->map(fn ($v) => round((float) $v, 2));
     }
 
     /**
