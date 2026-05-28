@@ -21,6 +21,11 @@ class DashboardController extends Controller
 
     public function index(Request $request)
     {
+        // Export CSV : on intercepte avant le rendu normal
+        if ($request->boolean('export') === true || $request->query('export') === 'csv') {
+            return $this->exportCsv($request);
+        }
+
         $term  = $request->string('q')->toString() ?: null;
         $etat  = $request->string('etat')->toString() ?: null;
         $only  = $request->boolean('actifs', true);
@@ -157,6 +162,70 @@ class DashboardController extends Controller
             'nbTachesParProjet', 'nbPlanningsParProjet', 'libellesEtats',
             'derapagesEnriched', 'topMargeEnriched', 'chartVenduRealise'
         ));
+    }
+
+    /** Export CSV de la liste des projets (avec filtres courants appliqués). */
+    private function exportCsv(Request $request)
+    {
+        $term  = $request->string('q')->toString() ?: null;
+        $etat  = $request->string('etat')->toString() ?: null;
+        $only  = $request->boolean('actifs', true);
+        $derapagesOnly = $request->boolean('derapages');
+
+        $base = Projet::query();
+        if ($only) $base->actifs();
+        $base->search($term)->etat($etat);
+
+        $ventes   = $this->rawRows()->where('table_name', 'S_Tache')
+            ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_V')::numeric, 0)) AS s")
+            ->groupBy('pid')->pluck('s', 'pid');
+        $realises = $this->rawRows()->where('table_name', 'S_Tache')
+            ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_R')::numeric, 0)) AS s")
+            ->groupBy('pid')->pluck('s', 'pid');
+
+        if ($derapagesOnly) {
+            $ids = $realises->filter(fn ($r, $pid) => (float) $r > (float) ($ventes[$pid] ?? 0))->keys()->all();
+            if (!empty($ids)) $base->whereRaw("(payload->>'IDProjet')::int = ANY(?)", ['{' . implode(',', $ids) . '}']);
+            else $base->whereRaw('1=0');
+        }
+
+        $libelles = $this->rawRows()->where('table_name', 'S_Projet_etat')->get()
+            ->mapWithKeys(function ($r) {
+                $p = $this->jsonRow($r->payload);
+                return [$p['Etat_Code'] ?? '' => $p['Descriptif'] ?? ''];
+            });
+
+        $filename = 'projets-' . now()->format('Ymd-His') . '.csv';
+        return response()->streamDownload(function () use ($base, $ventes, $realises, $libelles) {
+            $out = fopen('php://output', 'w');
+            // BOM UTF-8 pour Excel
+            fwrite($out, "\xEF\xBB\xBF");
+            fputcsv($out, ['Numero', 'Nom', 'Etat', 'Description', 'DateDebut', 'DateFin', 'HeuresPrevues', 'Vendu', 'Realise', 'Marge', 'Conso%'], ';');
+
+            $base->orderByRaw("payload->>'Nom'")->chunk(200, function ($chunk) use ($out, $ventes, $realises, $libelles) {
+                foreach ($chunk as $p) {
+                    $pid = $p->id_projet;
+                    $v = (float) ($ventes[$pid] ?? 0);
+                    $r = (float) ($realises[$pid] ?? 0);
+                    $marge = $v - $r;
+                    $conso = $v > 0 ? round(($r / $v) * 100, 1) : 0;
+                    fputcsv($out, [
+                        $p->numero,
+                        $p->nom,
+                        $libelles[$p->etat] ?? $p->etat,
+                        \Illuminate\Support\Str::limit($p->description, 200, ''),
+                        $p->date_debut?->format('Y-m-d') ?? '',
+                        $p->date_fin?->format('Y-m-d') ?? '',
+                        $p->heures_prevues,
+                        $v,
+                        $r,
+                        $marge,
+                        $conso,
+                    ], ';');
+                }
+            });
+            fclose($out);
+        }, $filename, ['Content-Type' => 'text/csv; charset=UTF-8']);
     }
 
     /** Enrichit un top (id => valeur) avec nom + numéro du projet. */

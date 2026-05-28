@@ -146,6 +146,10 @@
             </div>
             <button type="submit">Filtrer</button>
             <a href="{{ route('dashboard') }}" class="muted" style="text-decoration:none;font-size:12px;">réinitialiser</a>
+            <a href="{{ route('dashboard', array_merge(request()->query(), ['export' => 'csv'])) }}"
+               style="margin-left:auto;font-size:12px;color:var(--ok);text-decoration:none;border:1px solid var(--ok);padding:5px 10px;border-radius:4px;">
+                📥 Export CSV
+            </a>
         </form>
     </div>
 
@@ -170,6 +174,9 @@
                         <th></th>
                     </tr>
                 </thead>
+                @php
+                    $pageVendu = 0; $pageRealise = 0;
+                @endphp
                 <tbody>
                     @foreach ($projets as $p)
                         @php
@@ -177,6 +184,7 @@
                             $v = (float) ($ventesParProjet[$pid]   ?? 0);
                             $r = (float) ($realisesParProjet[$pid] ?? 0);
                             $marge = $v - $r;
+                            $pageVendu += $v; $pageRealise += $r;
                             $pctConso = $v > 0 ? min(round(($r / $v) * 100, 1), 200) : 0;
                             $isDerapage = $v > 0 && $r > $v;
                             $nbT = (int) ($nbTachesParProjet[$pid]    ?? 0);
@@ -218,6 +226,20 @@
                         </tr>
                     @endforeach
                 </tbody>
+                @php $pageMarge = $pageVendu - $pageRealise; @endphp
+                <tfoot>
+                    <tr style="border-top:2px solid var(--accent);background:var(--panel2);">
+                        <td colspan="3" style="font-weight:600;">TOTAL page ({{ $projets->count() }} projets)</td>
+                        <td style="text-align:right;font-weight:600;">{{ number_format($pageVendu, 0, ',', ' ') }} €</td>
+                        <td style="text-align:right;font-weight:600;">{{ number_format($pageRealise, 0, ',', ' ') }} €</td>
+                        <td style="text-align:right;font-weight:600;color:{{ $pageMarge >= 0 ? 'var(--ok)' : 'var(--err)' }};">
+                            {{ number_format($pageMarge, 0, ',', ' ') }} €
+                        </td>
+                        <td colspan="4" class="muted" style="font-size:11px;">
+                            ({{ $projets->total() }} au total · pagine pour voir tout · totaux globaux dans les KPI en haut)
+                        </td>
+                    </tr>
+                </tfoot>
             </table>
             <div style="margin-top:12px;">{{ $projets->links() }}</div>
         @endif
