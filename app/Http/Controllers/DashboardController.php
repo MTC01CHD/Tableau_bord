@@ -234,7 +234,7 @@ class DashboardController extends Controller
         $nbSuivis = (int) DB::table('hfsql_raw_rows')
             ->where('tenant_id', $tenantId)->where('table_name', 'S_Com_Suivi')->count();
         $typesDistincts = $nbSuivis > 0 ? DB::select("
-            SELECT payload->>'Type' AS t, COUNT(*) AS n
+            SELECT COALESCE(payload->>'TYPE', payload->>'Type') AS t, COUNT(*) AS n
             FROM hfsql_raw_rows
             WHERE tenant_id = ? AND table_name = 'S_Com_Suivi'
             GROUP BY t ORDER BY n DESC LIMIT 20

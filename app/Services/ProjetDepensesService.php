@@ -72,7 +72,7 @@ class ProjetDepensesService
              AND (sce.payload->>'IDS_Com_Suivi')::int = (sc.payload->>'IDS_Com_Suivi')::int
             WHERE sc.table_name = 'S_Com_Suivi'
               AND sc.tenant_id = ?
-              AND UPPER(sc.payload->>'Type') = 'VENTE'
+              AND UPPER(COALESCE(sc.payload->>'TYPE', sc.payload->>'Type')) = 'VENTE'
             GROUP BY pid
         ", [$tenantId]);
 
@@ -117,7 +117,7 @@ class ProjetDepensesService
                  AND (sce.payload->>'IDS_Com_Suivi')::int = (sc.payload->>'IDS_Com_Suivi')::int
                 WHERE sc.table_name = 'S_Com_Suivi'
                   AND sc.tenant_id = ?
-                  AND UPPER(sc.payload->>'Type') = 'ACHAT'
+                  AND UPPER(COALESCE(sc.payload->>'TYPE', sc.payload->>'Type')) = 'ACHAT'
                 GROUP BY pid
             ", [$tenantId]);
             foreach ($rows as $r) {
@@ -239,7 +239,7 @@ class ProjetDepensesService
         }
 
         $suivis = $this->rows('S_Com_Suivi')
-            ->whereRaw("UPPER(payload->>'Type') = 'VENTE'")
+            ->whereRaw("UPPER(COALESCE(payload->>'TYPE', payload->>'Type')) = 'VENTE'")
             ->whereRaw("(payload->>'IDProjet')::int = ?", [$idProjet])
             ->get()
             ->map(fn ($r) => $this->jsonRow($r->payload))
@@ -560,7 +560,7 @@ class ProjetDepensesService
         }
 
         $suivis = $this->rows('S_Com_Suivi')
-            ->whereRaw("UPPER(payload->>'Type') = 'ACHAT'")
+            ->whereRaw("UPPER(COALESCE(payload->>'TYPE', payload->>'Type')) = 'ACHAT'")
             ->whereRaw("(payload->>'IDProjet')::int = ?", [$idProjet])
             ->get()
             ->map(fn ($r) => $this->jsonRow($r->payload))
