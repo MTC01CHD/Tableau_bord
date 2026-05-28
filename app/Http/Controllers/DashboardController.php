@@ -355,11 +355,56 @@ class DashboardController extends Controller
             }
         }
 
+        // Diagnostic dépenses : accessible via ?debug=depenses
+        $debugDepenses = null;
+        if ($request->query('debug') === 'depenses') {
+            $samplePlannings = $this->rawRows()
+                ->where('table_name', 'P_Planning')
+                ->whereRaw("(payload->>'ID_Origine')::int = ?", [$id])
+                ->limit(3)
+                ->get()
+                ->map(fn ($r) => $this->jsonRow($r->payload));
+
+            $planningIdsSample = $samplePlannings->pluck('IDP_Planning')->filter()->map(fn ($v) => (int) $v)->all();
+            $samplePointages = empty($planningIdsSample) ? collect() : $this->rawRows()
+                ->where('table_name', 'P_Planning_Pointage')
+                ->whereRaw("(payload->>'IDP_Planning')::int = ANY(?)", ['{' . implode(',', $planningIdsSample) . '}'])
+                ->limit(3)
+                ->get()
+                ->map(fn ($r) => $this->jsonRow($r->payload));
+
+            $debugDepenses = [
+                'familles_chargees' => array_map(fn ($f) => [
+                    'id' => $f['id'], 'nom' => $f['nom'], 'constante' => $f['constante'],
+                    'par_defaut' => $f['par_defaut'], 'materiel' => $f['materiel'],
+                    'nb_lignes' => $f['lignes']->count(), 'sous_total' => $f['sous_total'],
+                ], $depenses['familles']),
+                'tables_presentes' => [
+                    'P_Planning'           => $this->rawRows()->where('table_name', 'P_Planning')->exists(),
+                    'P_Planning_Pointage'  => $this->rawRows()->where('table_name', 'P_Planning_Pointage')->exists(),
+                    'P_Pointage_Materiel'  => $this->rawRows()->where('table_name', 'P_Pointage_Materiel')->exists(),
+                    'p_pointage_materiel_location' => $this->rawRows()->where('table_name', 'p_pointage_materiel_location')->exists(),
+                    'P_Ressource_Prix'     => $this->rawRows()->where('table_name', 'P_Ressource_Prix')->exists(),
+                    'S_Engin'              => $this->rawRows()->where('table_name', 'S_Engin')->exists(),
+                    'S_Personnel'          => $this->rawRows()->where('table_name', 'S_Personnel')->exists(),
+                    'S_Famille_Moyen'      => $this->rawRows()->where('table_name', 'S_Famille_Moyen')->exists(),
+                    'S_Com_Suivi'          => $this->rawRows()->where('table_name', 'S_Com_Suivi')->exists(),
+                    'S_Com_Suivi_Element'  => $this->rawRows()->where('table_name', 'S_Com_Suivi_Element')->exists(),
+                ],
+                'planning_count_total'      => $planningCount,
+                'pointages_count_pour_ces_plannings' => $samplePointages->count(),
+                'sample_planning_payload'   => $samplePlannings->first(),
+                'sample_planning_keys'      => $samplePlannings->first() ? array_keys($samplePlannings->first()) : [],
+                'sample_pointage_payload'   => $samplePointages->first(),
+                'sample_pointage_keys'      => $samplePointages->first() ? array_keys($samplePointages->first()) : [],
+            ];
+        }
+
         return view('dashboard.projet', compact(
             'projet', 'etatLibelle', 'gestionnaireNom', 'departementNom',
             'taches', 'planningCount',
             'depenses', 'realise', 'heuresPersonnel', 'heuresMateriel',
-            'from', 'to'
+            'from', 'to', 'debugDepenses'
         ));
     }
 
