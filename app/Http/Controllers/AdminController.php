@@ -341,12 +341,19 @@ class AdminController extends Controller
         })->isNotEmpty();
 
         // Diagnostic queue : combien de jobs en attente, combien failed.
-        // Permet de voir si le worker tourne vraiment.
-        $queueDiag = [
-            'connection'      => config('queue.default'),
-            'jobs_pending'    => (int) DB::table('jobs')->where('queue', 'default')->count(),
-            'jobs_failed'     => (int) DB::table('failed_jobs')->count(),
-        ];
+        // Wrapping defensif : si une table n'existe pas (cas edge), on degrade
+        // gracefully au lieu de 500 la page.
+        $queueDiag = ['connection' => config('queue.default')];
+        try {
+            $queueDiag['jobs_pending'] = (int) DB::table('jobs')->where('queue', 'default')->count();
+        } catch (\Throwable) {
+            $queueDiag['jobs_pending'] = null;
+        }
+        try {
+            $queueDiag['jobs_failed'] = (int) DB::table('failed_jobs')->count();
+        } catch (\Throwable) {
+            $queueDiag['jobs_failed'] = null;
+        }
 
         return response()->json([
             'is_running'         => $isProcessLive,
