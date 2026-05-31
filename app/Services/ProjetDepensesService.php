@@ -47,9 +47,12 @@ class ProjetDepensesService
     public function autoriseParProjet(): Collection
     {
         $tenantId = $this->ctx->requireId();
-        return Cache::remember("autorise_par_projet:{$tenantId}", 300, function () use ($tenantId) {
-            return $this->doAutoriseParProjet($tenantId);
+        // On stocke en array (sérialisable nativement) plutôt qu'en Collection
+        // pour éviter __PHP_Incomplete_Class après un refactor de la classe.
+        $arr = Cache::remember("autorise_par_projet:v2:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doAutoriseParProjet($tenantId)->all();
         });
+        return collect(is_array($arr) ? $arr : []);
     }
 
     private function doAutoriseParProjet(int $tenantId): Collection
@@ -92,15 +95,11 @@ class ProjetDepensesService
      */
     public function realiseParProjet(): Collection
     {
-        if (!$this->tableExists('S_Com_Suivi') || !$this->tableExists('S_Com_Suivi_Element')) {
-            return collect();
-        }
-
         $tenantId = $this->ctx->requireId();
-        // Cache 5 min : la sync HFSQL tourne toutes les ~15 min, donc fraîcheur OK.
-        return Cache::remember("realise_par_projet:{$tenantId}", 300, function () use ($tenantId) {
-            return $this->doRealiseParProjet($tenantId);
+        $arr = Cache::remember("realise_par_projet:v2:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doRealiseParProjet($tenantId)->all();
         });
+        return collect(is_array($arr) ? $arr : []);
     }
 
     private function doRealiseParProjet(int $tenantId): Collection
@@ -150,10 +149,10 @@ class ProjetDepensesService
     public function depensesParProjet(): Collection
     {
         $tenantId = $this->ctx->requireId();
-        // Cache 5 min : la sync HFSQL tourne toutes les ~15 min, donc fraîcheur OK.
-        return Cache::remember("depenses_par_projet:{$tenantId}", 300, function () use ($tenantId) {
-            return $this->doDepensesParProjet($tenantId);
+        $arr = Cache::remember("depenses_par_projet:v2:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doDepensesParProjet($tenantId)->all();
         });
+        return collect(is_array($arr) ? $arr : []);
     }
 
     /**
@@ -167,9 +166,10 @@ class ProjetDepensesService
     public function heuresParProjet(): Collection
     {
         $tenantId = $this->ctx->requireId();
-        return Cache::remember("heures_par_projet:{$tenantId}", 300, function () use ($tenantId) {
-            return $this->doHeuresParProjet($tenantId);
+        $arr = Cache::remember("heures_par_projet:v2:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doHeuresParProjet($tenantId)->all();
         });
+        return collect(is_array($arr) ? $arr : []);
     }
 
     private function doHeuresParProjet(int $tenantId): Collection
