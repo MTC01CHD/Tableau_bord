@@ -32,9 +32,16 @@ return [
     'S_Personnel',
     'S_Engin',
 
-    // Suivi commercial (vente = autorisé, achat = dépense)
+    // Commandes (devis Vente / bons de commande Achat) + lignes
+    'S_Com_Commande',
+    'S_Com_Commande_Element',
+    // Suivi commercial (vente = autorisé sur devis, achat = consommé)
     'S_Com_Suivi',
     'S_Com_Suivi_Element',
+    // Facturation client (FA = facture, NC = note de crédit)
+    'S_Com_Facturation',
+    // Champs de calcul des moyens (pour les décompositions tâche × moyen)
+    'S_Moyen_Champs',
 
     // Pointages personnel
     'P_Planning',

@@ -39,6 +39,51 @@ class ProjetDepensesService
     public function __construct(private TenantContext $ctx) {}
 
     /**
+     * Autorisé (= prévu PV/PR du devis client) agrégé par projet.
+     * Logique CMD_PROJET_VENTE_PR_PV.sql : S_Com_Commande(Type='Vente') × S_Com_Commande_Element.
+     *
+     * @return Collection<int, array{pv:float, pr:float}>
+     */
+    public function autoriseParProjet(): Collection
+    {
+        $tenantId = $this->ctx->requireId();
+        return Cache::remember("autorise_par_projet:{$tenantId}", 300, function () use ($tenantId) {
+            return $this->doAutoriseParProjet($tenantId);
+        });
+    }
+
+    private function doAutoriseParProjet(int $tenantId): Collection
+    {
+        if (!$this->tableExists('S_Com_Commande') || !$this->tableExists('S_Com_Commande_Element')) {
+            return collect();
+        }
+
+        $rows = DB::select("
+            SELECT
+                NULLIF(cmd.payload->>'IDOrigine', '')::int AS pid,
+                SUM(COALESCE(NULLIF(cce.payload->>'Somme_V','')::numeric, 0)) AS pv,
+                SUM(COALESCE(NULLIF(cce.payload->>'Somme_R','')::numeric, 0)) AS pr
+            FROM hfsql_raw_rows cmd
+            JOIN hfsql_raw_rows cce
+              ON cce.table_name = 'S_Com_Commande_Element'
+             AND cce.tenant_id = cmd.tenant_id
+             AND NULLIF(cce.payload->>'IDS_Com_Commande','')::int = NULLIF(cmd.payload->>'IDS_Com_Commande','')::int
+             AND UPPER(COALESCE(cce.payload->>'TypeLigne','')) NOT IN ('OPTION', 'TOTAL', 'TEXTE', 'TITRE')
+             AND COALESCE(NULLIF(cce.payload->>'Quantite','')::numeric, 0) != 0
+            WHERE cmd.table_name = 'S_Com_Commande'
+              AND cmd.tenant_id = ?
+              AND UPPER(COALESCE(cmd.payload->>'TYPE', cmd.payload->>'Type')) = 'VENTE'
+              AND COALESCE(NULLIF(cmd.payload->>'DemandePrix','')::int, 0) = 0
+              AND NULLIF(cmd.payload->>'IDOrigine','') IS NOT NULL
+            GROUP BY pid
+        ", [$tenantId]);
+
+        return collect($rows)->mapWithKeys(fn ($r) => [
+            (int) $r->pid => ['pv' => (float) $r->pv, 'pr' => (float) $r->pr],
+        ]);
+    }
+
+    /**
      * Réalisé agrégé par projet (pour la liste du dashboard).
      * Une seule requête SQL pour tous les projets.
      * Type comparé en case-insensitive pour tolérer Vente/VENTE/vente.
@@ -60,26 +105,35 @@ class ProjetDepensesService
 
     private function doRealiseParProjet(int $tenantId): Collection
     {
-        // NULLIF(..., '') sécurise les casts ::int et ::numeric contre les strings vides
-        // qui plantent Postgres ("invalid input syntax for type integer/numeric").
+        // RÉALISÉ = FACTURÉ CLIENT (FACTURER.sql de référence).
+        // S_Com_Facturation.TypeDoc='FA' (factures) MOINS 'NC' (notes de crédit).
+        // Le PR du facturé n'est pas dans cette table → 'pr' reste 0 pour l'instant
+        // (à compléter via une autre source si dispo).
+        if (!$this->tableExists('S_Com_Facturation')) {
+            return collect();
+        }
+
         $rows = DB::select("
             SELECT
-                NULLIF(sc.payload->>'IDProjet', '')::int AS pid,
-                SUM(COALESCE(NULLIF(sce.payload->>'Somme_V', '')::numeric, 0)) AS pv,
-                SUM(COALESCE(NULLIF(sce.payload->>'Somme_R', '')::numeric, 0)) AS pr
-            FROM hfsql_raw_rows sc
-            JOIN hfsql_raw_rows sce
-              ON sce.table_name = 'S_Com_Suivi_Element'
-             AND sce.tenant_id = sc.tenant_id
-             AND NULLIF(sce.payload->>'IDS_Com_Suivi', '')::int = NULLIF(sc.payload->>'IDS_Com_Suivi', '')::int
-            WHERE sc.table_name = 'S_Com_Suivi'
-              AND sc.tenant_id = ?
-              AND UPPER(COALESCE(sc.payload->>'TYPE', sc.payload->>'Type')) = 'VENTE'
+                NULLIF(payload->>'IDProjet', '')::int AS pid,
+                SUM(
+                    CASE
+                        WHEN UPPER(COALESCE(payload->>'TypeDoc','')) = 'FA' THEN COALESCE(NULLIF(payload->>'TotalHTVA','')::numeric, 0)
+                        WHEN UPPER(COALESCE(payload->>'TypeDoc','')) = 'NC' THEN -COALESCE(NULLIF(payload->>'TotalHTVA','')::numeric, 0)
+                        ELSE 0
+                    END
+                ) AS pv
+            FROM hfsql_raw_rows
+            WHERE table_name = 'S_Com_Facturation'
+              AND tenant_id = ?
+              AND UPPER(COALESCE(payload->>'TypeDoc','')) IN ('FA', 'NC')
+              AND COALESCE(NULLIF(payload->>'TotalHTVA','')::numeric, 0) != 0
+              AND NULLIF(payload->>'IDProjet','') IS NOT NULL
             GROUP BY pid
         ", [$tenantId]);
 
         return collect($rows)->mapWithKeys(fn ($r) => [
-            (int) $r->pid => ['pv' => (float) $r->pv, 'pr' => (float) $r->pr],
+            (int) $r->pid => ['pv' => (float) $r->pv, 'pr' => 0.0],
         ]);
     }
 
@@ -209,20 +263,33 @@ class ProjetDepensesService
     {
         $totaux = [];
 
-        // 1) Achats : 1 SQL agrégé léger (NULLIF pour sécuriser les casts)
-        if ($this->tableExists('S_Com_Suivi') && $this->tableExists('S_Com_Suivi_Element')) {
+        // 1) Achats (= SUIVI_ACHAT.sql de référence) :
+        // S_Com_Commande(Type='Achat', IDOrigine=IDProjet)
+        //   → S_Com_Suivi(Type='Achat', IDS_Com_Commande=…)
+        //   → S_Com_Suivi_Element (filtres TypeLigne, Quantite, PU_V)
+        // Le projet est lié à la commande, PAS au suivi directement.
+        if ($this->tableExists('S_Com_Commande') && $this->tableExists('S_Com_Suivi') && $this->tableExists('S_Com_Suivi_Element')) {
             $rows = DB::select("
                 SELECT
-                    NULLIF(sc.payload->>'IDProjet', '')::int AS pid,
+                    NULLIF(cmd.payload->>'IDOrigine', '')::int AS pid,
                     SUM(COALESCE(NULLIF(sce.payload->>'Somme_V', '')::numeric, 0)) AS s
-                FROM hfsql_raw_rows sc
+                FROM hfsql_raw_rows cmd
+                JOIN hfsql_raw_rows sc
+                  ON sc.table_name = 'S_Com_Suivi'
+                 AND sc.tenant_id = cmd.tenant_id
+                 AND NULLIF(sc.payload->>'IDS_Com_Commande', '')::int = NULLIF(cmd.payload->>'IDS_Com_Commande', '')::int
+                 AND UPPER(COALESCE(sc.payload->>'TYPE', sc.payload->>'Type')) = 'ACHAT'
                 JOIN hfsql_raw_rows sce
                   ON sce.table_name = 'S_Com_Suivi_Element'
                  AND sce.tenant_id = sc.tenant_id
                  AND NULLIF(sce.payload->>'IDS_Com_Suivi', '')::int = NULLIF(sc.payload->>'IDS_Com_Suivi', '')::int
-                WHERE sc.table_name = 'S_Com_Suivi'
-                  AND sc.tenant_id = ?
-                  AND UPPER(COALESCE(sc.payload->>'TYPE', sc.payload->>'Type')) = 'ACHAT'
+                 AND UPPER(COALESCE(sce.payload->>'TypeLigne','')) NOT IN ('OPTION', 'TOTAL', 'TEXTE', 'TITRE')
+                 AND COALESCE(NULLIF(sce.payload->>'Quantite','')::numeric, 0) != 0
+                WHERE cmd.table_name = 'S_Com_Commande'
+                  AND cmd.tenant_id = ?
+                  AND UPPER(COALESCE(cmd.payload->>'TYPE', cmd.payload->>'Type')) = 'ACHAT'
+                  AND COALESCE(NULLIF(cmd.payload->>'DemandePrix','')::int, 0) = 0
+                  AND NULLIF(cmd.payload->>'IDOrigine','') IS NOT NULL
                 GROUP BY pid
             ", [$tenantId]);
             foreach ($rows as $r) {

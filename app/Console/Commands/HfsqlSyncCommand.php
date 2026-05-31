@@ -152,6 +152,7 @@ class HfsqlSyncCommand extends Command
             \Illuminate\Support\Facades\Cache::forget("realise_par_projet:{$tenantId}");
             \Illuminate\Support\Facades\Cache::forget("depenses_par_projet:{$tenantId}");
             \Illuminate\Support\Facades\Cache::forget("heures_par_projet:{$tenantId}");
+            \Illuminate\Support\Facades\Cache::forget("autorise_par_projet:{$tenantId}");
         }
 
         return $globalOk;

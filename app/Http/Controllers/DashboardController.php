@@ -41,19 +41,12 @@ class DashboardController extends Controller
         if ($only) $base->actifs();
         $base->search($term)->etat($etat);
 
-        // ── Agrégats par projet (un seul SQL chacun, lookup par IDProjet) ──
-        // Prévu en prix de vente par projet (Σ S_Tache.Somme_V)
-        $prevuPVParProjet = $this->rawRows()
-            ->where('table_name', 'S_Tache')
-            ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_V')::numeric, 0)) AS s")
-            ->groupBy('pid')
-            ->pluck('s', 'pid');
-        // Prévu en prix de revient par projet (Σ S_Tache.Somme_R) — c'est du PRÉVU, pas du réalisé.
-        $prevuPRParProjet = $this->rawRows()
-            ->where('table_name', 'S_Tache')
-            ->selectRaw("(payload->>'IDProjet')::int AS pid, SUM(COALESCE((payload->>'Somme_R')::numeric, 0)) AS s")
-            ->groupBy('pid')
-            ->pluck('s', 'pid');
+        // ── Agrégats par projet ──
+        // PRÉVU PV/PR : depuis S_Com_Commande(Type='Vente') × S_Com_Commande_Element
+        // (logique CMD_PROJET_VENTE_PR_PV.sql — la source officielle de l'autorisé).
+        $autoriseAggr = $this->depenses->autoriseParProjet();
+        $prevuPVParProjet = $autoriseAggr->map(fn ($r) => $r['pv']);
+        $prevuPRParProjet = $autoriseAggr->map(fn ($r) => $r['pr']);
         // RÉALISÉ par projet = Σ éléments de S_Com_Suivi(Type='Vente') — PV et PR
         // (une seule requête SQL agrégée pour tous les projets).
         $realiseAggr = $this->depenses->realiseParProjet();
@@ -276,8 +269,8 @@ class DashboardController extends Controller
             }
         }
 
-        // 4) Tables pointages : count + clés du 1er payload pour chaque
-        $pointageTables = ['P_Planning', 'P_Planning_Pointage', 'P_Pointage_Materiel', 'p_pointage_materiel_location', 'P_Ressource_Prix', 'S_Famille_Moyen'];
+        // 4) Tables critiques (pointages + commande + facturation) : count + clés du 1er payload
+        $pointageTables = ['S_Com_Commande', 'S_Com_Commande_Element', 'S_Com_Facturation', 'P_Planning', 'P_Planning_Pointage', 'P_Pointage_Materiel', 'p_pointage_materiel_location', 'P_Ressource_Prix', 'S_Famille_Moyen'];
         $diag['tables_pointages'] = [];
         foreach ($pointageTables as $tbl) {
             $count = (int) DB::table('hfsql_raw_rows')->where('tenant_id', $tenantId)->where('table_name', $tbl)->count();
